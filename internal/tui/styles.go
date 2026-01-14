@@ -3,17 +3,29 @@ package tui
 import "github.com/charmbracelet/lipgloss"
 
 var (
-	// Brand colors
-	primaryColor   = lipgloss.Color("#FF6B6B")
-	accentColor    = lipgloss.Color("#4ECDC4")
-	successColor   = lipgloss.Color("#95E879")
-	errorColor     = lipgloss.Color("#FF6B6B")
-	warningColor   = lipgloss.Color("#FFE66D")
-	mutedColor     = lipgloss.Color("#6C757D")
-	bgColor        = lipgloss.Color("#1A1B26")
-	surfaceColor   = lipgloss.Color("#24283B")
-	textColor      = lipgloss.Color("#C0CAF5")
-	dimTextColor   = lipgloss.Color("#565F89")
+	// Claude brand colors
+	// Primary palette
+	claudeDark      = lipgloss.Color("#141413") // Dark backgrounds
+	claudeLight     = lipgloss.Color("#faf9f5") // Light text
+	claudeMidGray   = lipgloss.Color("#b0aea5") // Secondary elements
+	claudeLightGray = lipgloss.Color("#e8e6dc") // Subtle backgrounds
+
+	// Accent colors
+	claudeOrange = lipgloss.Color("#d97757") // Primary accent
+	claudeBlue   = lipgloss.Color("#6a9bcc") // Secondary accent
+	claudeGreen  = lipgloss.Color("#788c5d") // Tertiary accent
+
+	// Mapped colors for TUI
+	primaryColor = claudeOrange
+	accentColor  = claudeBlue
+	successColor = claudeGreen
+	errorColor   = lipgloss.Color("#c45c4a") // Darker orange-red for errors
+	warningColor = claudeOrange
+	mutedColor   = claudeMidGray
+	bgColor      = claudeDark
+	surfaceColor = lipgloss.Color("#1e1e1d") // Slightly lighter than dark
+	textColor    = claudeLight
+	dimTextColor = claudeMidGray
 
 	// App frame
 	appStyle = lipgloss.NewStyle().
@@ -22,7 +34,7 @@ var (
 	// Header
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
+			Foreground(claudeLight).
 			Background(primaryColor).
 			Padding(0, 2).
 			MarginBottom(1)
@@ -41,7 +53,7 @@ var (
 				Padding(0, 1)
 
 	selectedRowStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FFFFFF")).
+				Foreground(claudeLight).
 				Background(primaryColor).
 				Bold(true).
 				Padding(0, 1)
@@ -56,19 +68,19 @@ var (
 
 	// Status badges
 	enabledBadge = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#000000")).
+			Foreground(claudeDark).
 			Background(successColor).
 			Bold(true).
 			Padding(0, 1)
 
 	disabledBadge = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFFFFF")).
+			Foreground(claudeLight).
 			Background(mutedColor).
 			Padding(0, 1)
 
 	runningBadge = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#000000")).
-			Background(warningColor).
+			Foreground(claudeDark).
+			Background(claudeBlue).
 			Bold(true).
 			Padding(0, 1)
 
