@@ -102,21 +102,36 @@ install() {
     info "Binary installed: $INSTALL_DIR/$TARGET_NAME"
 }
 
-# Check if install dir is in PATH
+# Check if install dir is in PATH and add if needed
 check_path() {
-    if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-        echo ""
-        warn "$INSTALL_DIR is not in your PATH"
-        echo ""
-        echo "Add it to your shell config:"
-        echo ""
-        echo -e "  ${CYAN}# For bash (~/.bashrc)${NC}"
-        echo "  export PATH=\"\$PATH:$INSTALL_DIR\""
-        echo ""
-        echo -e "  ${CYAN}# For zsh (~/.zshrc)${NC}"
-        echo "  export PATH=\"\$PATH:$INSTALL_DIR\""
-        echo ""
+    if [[ ":$PATH:" == *":$INSTALL_DIR:"* ]]; then
+        return 0
     fi
+
+    # Determine shell config file
+    local shell_rc=""
+    if [ -n "$ZSH_VERSION" ] || [ "$SHELL" = "/bin/zsh" ] || [ "$SHELL" = "/usr/bin/zsh" ]; then
+        shell_rc="$HOME/.zshrc"
+    else
+        shell_rc="$HOME/.bashrc"
+    fi
+
+    local path_line="export PATH=\"\$PATH:$INSTALL_DIR\""
+
+    # Check if already in config (maybe PATH just not reloaded)
+    if [ -f "$shell_rc" ] && grep -q "$INSTALL_DIR" "$shell_rc" 2>/dev/null; then
+        info "$INSTALL_DIR already in $shell_rc (restart shell to apply)"
+        return 0
+    fi
+
+    # Add to shell config
+    echo "" >> "$shell_rc"
+    echo "# Added by claude-tasks installer" >> "$shell_rc"
+    echo "$path_line" >> "$shell_rc"
+    info "Added $INSTALL_DIR to PATH in $shell_rc"
+
+    # Also export for current session
+    export PATH="$PATH:$INSTALL_DIR"
 }
 
 # Setup Sprite service (if running on Sprite)
