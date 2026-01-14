@@ -11,10 +11,11 @@ A TUI scheduler for running Claude tasks on a cron schedule. Built with [Bubble 
 
 - **Cron Scheduling** - Schedule Claude tasks using 6-field cron expressions (second granularity)
 - **Real-time TUI** - Beautiful terminal interface with live updates, spinners, and progress bars
-- **Discord Webhooks** - Get task results posted to Discord channels
+- **Discord & Slack Webhooks** - Get task results posted to Discord/Slack with rich formatting
 - **Usage Tracking** - Monitor your Anthropic API usage with visual progress bars
 - **Usage Thresholds** - Automatically skip tasks when usage exceeds a configurable threshold
 - **Markdown Rendering** - Task output rendered with [Glamour](https://github.com/charmbracelet/glamour)
+- **Self-Update** - Upgrade to the latest version with `claude-tasks upgrade`
 - **SQLite Storage** - Persistent task and run history
 
 ## Installation
@@ -49,18 +50,28 @@ go build -o claude-tasks ./cmd/claude-tasks
 
 ## Usage
 
+### CLI Commands
+
+```bash
+claude-tasks              # Launch the interactive TUI
+claude-tasks version      # Show version information
+claude-tasks upgrade      # Upgrade to the latest version
+claude-tasks help         # Show help message
+```
+
 ### Keybindings
 
 | Key | Action |
 |-----|--------|
 | `a` | Add new task |
 | `e` | Edit selected task |
-| `d` | Delete selected task |
+| `d` | Delete selected task (with confirmation) |
 | `t` | Toggle task enabled/disabled |
 | `r` | Run task immediately |
+| `/` | Search/filter tasks |
 | `Enter` | View task output history |
 | `s` | Settings (usage threshold) |
-| `?` | Toggle full help |
+| `?` | Toggle help / Cron presets (in cron field) |
 | `q` | Quit |
 
 ### Cron Format
@@ -75,13 +86,24 @@ Uses 6-field cron expressions: `second minute hour day month weekday`
 0 0 9 * * 0      # Every Sunday at 9:00 AM
 ```
 
-### Discord Webhooks
+### Webhooks (Discord & Slack)
 
-Add a Discord webhook URL when creating a task to receive notifications:
+Add webhook URLs when creating a task to receive notifications:
 
+**Discord:**
+- Rich embeds with colored sidebar (green/red/yellow)
+- Markdown formatting preserved
+- Task status, duration, working directory
+
+**Slack:**
+- Block Kit formatting with rich layouts
+- Markdown converted to Slack's mrkdwn format
+- Timestamps and status fields
+
+Both include:
 - Task completion status (success/failure)
 - Execution duration
-- Output (truncated if too long)
+- Output with markdown formatting
 - Error details if failed
 
 ### Usage Threshold
