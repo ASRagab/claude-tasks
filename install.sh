@@ -127,6 +127,12 @@ setup_sprite_service() {
 
     info "Sprite environment detected, setting up daemon service..."
 
+    # Ensure jq is installed (needed by sprite-env)
+    if ! command -v jq &> /dev/null; then
+        info "Installing jq..."
+        sudo apt-get update -qq && sudo apt-get install -y -qq jq
+    fi
+
     # Stop and remove existing service if present (ignore errors)
     sprite-env services stop claude-tasks-daemon >/dev/null 2>&1 || true
     sprite-env services delete claude-tasks-daemon >/dev/null 2>&1 || true
