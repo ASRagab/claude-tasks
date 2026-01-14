@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -107,6 +108,7 @@ type Model struct {
 
 	// Add/Edit form
 	formInputs  []textinput.Model
+	promptInput textarea.Model
 	formFocus   int
 	editingTask *db.Task
 
@@ -227,10 +229,13 @@ func (m *Model) initFormInputs() {
 	m.formInputs[fieldName].CharLimit = 100
 	m.formInputs[fieldName].Width = 50
 
-	m.formInputs[fieldPrompt] = textinput.New()
-	m.formInputs[fieldPrompt].Placeholder = "Review recent changes and summarize"
-	m.formInputs[fieldPrompt].CharLimit = 2000
-	m.formInputs[fieldPrompt].Width = 50
+	// Prompt uses textarea for multi-line input
+	m.promptInput = textarea.New()
+	m.promptInput.Placeholder = "Review recent changes and summarize..."
+	m.promptInput.CharLimit = 2000
+	m.promptInput.SetWidth(52)
+	m.promptInput.SetHeight(6)
+	m.promptInput.ShowLineNumbers = false
 
 	m.formInputs[fieldCron] = textinput.New()
 	m.formInputs[fieldCron].Placeholder = "0 * * * * * (every minute)"
@@ -253,8 +258,24 @@ func (m *Model) initFormInputs() {
 func (m *Model) resetForm() {
 	m.initFormInputs()
 	m.formFocus = 0
-	m.formInputs[0].Focus()
+	m.formInputs[fieldName].Focus()
 	m.editingTask = nil
+}
+
+func (m *Model) focusFormField(field int) {
+	// Blur all fields first
+	for i := range m.formInputs {
+		m.formInputs[i].Blur()
+	}
+	m.promptInput.Blur()
+
+	// Focus the target field
+	m.formFocus = field
+	if field == fieldPrompt {
+		m.promptInput.Focus()
+	} else {
+		m.formInputs[field].Focus()
+	}
 }
 
 func (m *Model) updateTable() {
@@ -571,13 +592,13 @@ func (m *Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if idx < len(m.tasks) {
 				m.editingTask = m.tasks[idx]
 				m.currentView = ViewEdit
+				m.initFormInputs() // Reset form first
 				m.formInputs[fieldName].SetValue(m.editingTask.Name)
-				m.formInputs[fieldPrompt].SetValue(m.editingTask.Prompt)
+				m.promptInput.SetValue(m.editingTask.Prompt)
 				m.formInputs[fieldCron].SetValue(m.editingTask.CronExpr)
 				m.formInputs[fieldWorkingDir].SetValue(m.editingTask.WorkingDir)
 				m.formInputs[fieldDiscordWebhook].SetValue(m.editingTask.DiscordWebhook)
-				m.formFocus = 0
-				m.formInputs[0].Focus()
+				m.focusFormField(fieldName)
 				return m, textinput.Blink
 			}
 		}
@@ -604,32 +625,41 @@ func (m *Model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.currentView = ViewList
 		m.resetForm()
 		return m, nil
-	case "tab", "down":
-		m.formInputs[m.formFocus].Blur()
-		m.formFocus = (m.formFocus + 1) % fieldCount
-		m.formInputs[m.formFocus].Focus()
+	case "tab":
+		nextField := (m.formFocus + 1) % fieldCount
+		m.focusFormField(nextField)
 		return m, textinput.Blink
-	case "shift+tab", "up":
-		m.formInputs[m.formFocus].Blur()
-		m.formFocus--
-		if m.formFocus < 0 {
-			m.formFocus = fieldCount - 1
+	case "shift+tab":
+		prevField := m.formFocus - 1
+		if prevField < 0 {
+			prevField = fieldCount - 1
 		}
-		m.formInputs[m.formFocus].Focus()
+		m.focusFormField(prevField)
 		return m, textinput.Blink
 	case "ctrl+s":
 		return m, m.saveTask()
 	case "enter":
+		// In textarea (prompt), enter adds newline - don't navigate
+		if m.formFocus == fieldPrompt {
+			m.promptInput, cmd = m.promptInput.Update(msg)
+			return m, cmd
+		}
+		// On last field, submit
 		if m.formFocus == fieldCount-1 {
 			return m, m.saveTask()
 		}
-		m.formInputs[m.formFocus].Blur()
-		m.formFocus = (m.formFocus + 1) % fieldCount
-		m.formInputs[m.formFocus].Focus()
+		// Otherwise navigate to next field
+		nextField := (m.formFocus + 1) % fieldCount
+		m.focusFormField(nextField)
 		return m, textinput.Blink
 	}
 
-	m.formInputs[m.formFocus], cmd = m.formInputs[m.formFocus].Update(msg)
+	// Update the focused input
+	if m.formFocus == fieldPrompt {
+		m.promptInput, cmd = m.promptInput.Update(msg)
+	} else {
+		m.formInputs[m.formFocus], cmd = m.formInputs[m.formFocus].Update(msg)
+	}
 	return m, cmd
 }
 
@@ -685,7 +715,7 @@ func (m *Model) saveThreshold() tea.Cmd {
 func (m *Model) saveTask() tea.Cmd {
 	return func() tea.Msg {
 		name := strings.TrimSpace(m.formInputs[fieldName].Value())
-		prompt := strings.TrimSpace(m.formInputs[fieldPrompt].Value())
+		prompt := strings.TrimSpace(m.promptInput.Value())
 		cronExpr := strings.TrimSpace(m.formInputs[fieldCron].Value())
 		workingDir := strings.TrimSpace(m.formInputs[fieldWorkingDir].Value())
 		discordWebhook := strings.TrimSpace(m.formInputs[fieldDiscordWebhook].Value())
@@ -953,7 +983,7 @@ func (m Model) renderForm(title string) string {
 	labels := []string{"Name", "Prompt", "Cron Expression", "Working Directory", "Discord Webhook (optional)"}
 	hints := []string{
 		"",
-		"",
+		"(multi-line, tab to next field)",
 		"Format: sec min hour day month weekday",
 		"",
 		"",
@@ -967,10 +997,19 @@ func (m Model) renderForm(title string) string {
 		}
 		b.WriteString("\n")
 
-		if i == m.formFocus {
-			b.WriteString(focusedInputStyle.Render(m.formInputs[i].View()))
+		// Prompt field uses textarea
+		if i == fieldPrompt {
+			if i == m.formFocus {
+				b.WriteString(focusedInputStyle.Render(m.promptInput.View()))
+			} else {
+				b.WriteString(blurredInputStyle.Render(m.promptInput.View()))
+			}
 		} else {
-			b.WriteString(blurredInputStyle.Render(m.formInputs[i].View()))
+			if i == m.formFocus {
+				b.WriteString(focusedInputStyle.Render(m.formInputs[i].View()))
+			} else {
+				b.WriteString(blurredInputStyle.Render(m.formInputs[i].View()))
+			}
 		}
 		b.WriteString("\n\n")
 	}
@@ -992,7 +1031,7 @@ func (m Model) renderForm(title string) string {
 
 	// Cron examples
 	b.WriteString("\n\n")
-	b.WriteString(subtitleStyle.Render("Examples: "))
+	b.WriteString(subtitleStyle.Render("Cron examples: "))
 	b.WriteString(dimRowStyle.Render("0 * * * * * (every min) • 0 0 9 * * * (9am daily) • 0 0 */2 * * * (every 2h)"))
 
 	return b.String()
