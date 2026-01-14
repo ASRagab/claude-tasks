@@ -1,3 +1,5 @@
+<img width="906" height="660" alt="Screenshot 2026-01-14 at 18 26 52" src="https://github.com/user-attachments/assets/b687a2e8-45da-4720-87b6-cf8d38cc69ef" />
+
 # Claude Tasks
 
 A TUI scheduler for running Claude tasks on a cron schedule. Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
