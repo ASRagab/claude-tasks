@@ -127,23 +127,23 @@ setup_sprite_service() {
 
     info "Sprite environment detected, setting up daemon service..."
 
-    # Check if service already exists
-    if sprite-env services get claude-tasks-daemon &> /dev/null; then
-        info "Stopping existing daemon service..."
-        sprite-env services stop claude-tasks-daemon &> /dev/null || true
-        sprite-env services delete claude-tasks-daemon &> /dev/null || true
-    fi
+    # Stop and remove existing service if present (ignore errors)
+    sprite-env services stop claude-tasks-daemon >/dev/null 2>&1 || true
+    sprite-env services delete claude-tasks-daemon >/dev/null 2>&1 || true
 
     # Create the daemon service
-    sprite-env services create claude-tasks-daemon \
+    if sprite-env services create claude-tasks-daemon \
         --cmd "$INSTALL_DIR/$TARGET_NAME" \
         --args daemon \
-        --no-stream
+        --no-stream >/dev/null 2>&1; then
+        info "Daemon service created and started"
+    else
+        warn "Failed to create daemon service (you can run 'claude-tasks daemon' manually)"
+    fi
 
-    info "Daemon service created and started"
     echo ""
     echo -e "${CYAN}Sprite service commands:${NC}"
-    echo "  sprite-env services list                    # List all services"
+    echo "  sprite-env services list                       # List all services"
     echo "  sprite-env services stop claude-tasks-daemon   # Stop daemon"
     echo "  sprite-env services start claude-tasks-daemon  # Start daemon"
     echo ""
