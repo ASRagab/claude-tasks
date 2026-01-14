@@ -21,10 +21,16 @@ var (
 	appStyle = lipgloss.NewStyle().
 			Padding(1, 2)
 
-	// Logo
+	// Logo - white on dark terminals, dark on light terminals
 	logoStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(accentColor)
+			Foreground(lipgloss.AdaptiveColor{Light: "#141413", Dark: "#faf9f5"})
+
+	// 8-bit sprite icon in orange
+	spriteIcon = lipgloss.NewStyle().
+			Foreground(claudeOrange).
+			Bold(true).
+			Render("▀▄█▄▀")
 
 	// Table row style
 	dimRowStyle = lipgloss.NewStyle().

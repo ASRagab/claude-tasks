@@ -818,14 +818,21 @@ func (m Model) View() string {
 func (m Model) renderList() string {
 	var b strings.Builder
 
-	// Header with usage status
-	title := logoStyle.Render("◆ Claude Tasks")
-	b.WriteString(title)
-
-	// Usage status bar
-	if m.usageData != nil {
-		b.WriteString("  ")
-		b.WriteString(m.renderUsageBar())
+	// Header with usage status (right-justified)
+	logo := spriteIcon + " " + logoStyle.Render("Claude Tasks")
+	if m.usageData != nil && m.width > 0 {
+		usageBar := m.renderUsageBar()
+		logoWidth := lipgloss.Width(logo)
+		usageWidth := lipgloss.Width(usageBar)
+		padding := m.width - logoWidth - usageWidth - 4 // account for app padding
+		if padding < 2 {
+			padding = 2
+		}
+		b.WriteString(logo)
+		b.WriteString(strings.Repeat(" ", padding))
+		b.WriteString(usageBar)
+	} else {
+		b.WriteString(logo)
 	}
 	b.WriteString("\n\n")
 
@@ -945,7 +952,9 @@ func (m Model) formatUsagePct(pct float64) string {
 func (m Model) renderSettings() string {
 	var b strings.Builder
 
-	b.WriteString(logoStyle.Render("◆ Settings"))
+	b.WriteString(spriteIcon)
+	b.WriteString(" ")
+	b.WriteString(logoStyle.Render("Settings"))
 	b.WriteString("\n\n")
 
 	// Current usage display
@@ -977,7 +986,9 @@ func (m Model) renderSettings() string {
 func (m Model) renderForm(title string) string {
 	var b strings.Builder
 
-	b.WriteString(logoStyle.Render("◆ " + title))
+	b.WriteString(spriteIcon)
+	b.WriteString(" ")
+	b.WriteString(logoStyle.Render(title))
 	b.WriteString("\n\n")
 
 	labels := []string{"Name", "Prompt", "Cron Expression", "Working Directory", "Discord Webhook (optional)"}
@@ -1040,8 +1051,9 @@ func (m Model) renderForm(title string) string {
 func (m Model) renderOutput() string {
 	var b strings.Builder
 
-	title := fmt.Sprintf("◆ %s", m.selectedTask.Name)
-	b.WriteString(logoStyle.Render(title))
+	b.WriteString(spriteIcon)
+	b.WriteString(" ")
+	b.WriteString(logoStyle.Render(m.selectedTask.Name))
 	b.WriteString("  ")
 	if m.selectedTask.Enabled {
 		b.WriteString(statusOK.Render("● enabled"))
