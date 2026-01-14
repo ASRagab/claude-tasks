@@ -17,6 +17,16 @@ A TUI scheduler for running Claude tasks on a cron schedule. Built with [Bubble 
 
 ## Installation
 
+### Quick Install (Recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kylemclaren/claude-tasks/main/install.sh | bash
+```
+
+This downloads the latest binary for your platform to `~/.local/bin/`.
+
+### Build from Source
+
 ```bash
 # Clone the repo
 git clone https://github.com/kylemclaren/claude-tasks.git
