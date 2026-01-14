@@ -332,7 +332,10 @@ func truncate(s string, max int) string {
 type tasksLoadedMsg struct{ tasks []*db.Task }
 type taskCreatedMsg struct{ task *db.Task }
 type taskDeletedMsg struct{ id int64 }
-type taskToggledMsg struct{ id int64 }
+type taskToggledMsg struct {
+	id      int64
+	enabled bool
+}
 type taskRunsLoadedMsg struct{ runs []*db.TaskRun }
 type runningTasksMsg struct{ running map[int64]bool }
 type usageUpdatedMsg struct {
@@ -487,7 +490,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.loadTasks())
 
 	case taskToggledMsg:
-		m.setStatus("Task toggled", false)
+		if msg.enabled {
+			m.setStatus("Task enabled", false)
+		} else {
+			m.setStatus("Task disabled", false)
+		}
+		// Update selectedTask if we're in output view
+		if m.selectedTask != nil && m.selectedTask.ID == msg.id {
+			m.selectedTask.Enabled = msg.enabled
+		}
 		cmds = append(cmds, m.loadTasks())
 
 	case taskRunsLoadedMsg:
@@ -631,6 +642,8 @@ func (m *Model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "r":
 		return m, m.loadTaskRuns(m.selectedTask.ID)
+	case "t":
+		return m, m.toggleTask(m.selectedTask.ID)
 	}
 
 	m.viewport, cmd = m.viewport.Update(msg)
@@ -731,8 +744,9 @@ func (m *Model) toggleTask(id int64) tea.Cmd {
 		task, _ := m.db.GetTask(id)
 		if task != nil {
 			_ = m.scheduler.UpdateTask(task)
+			return taskToggledMsg{id: id, enabled: task.Enabled}
 		}
-		return taskToggledMsg{id}
+		return taskToggledMsg{id: id, enabled: false}
 	}
 }
 
@@ -989,6 +1003,12 @@ func (m Model) renderOutput() string {
 
 	title := fmt.Sprintf("◆ %s", m.selectedTask.Name)
 	b.WriteString(logoStyle.Render(title))
+	b.WriteString("  ")
+	if m.selectedTask.Enabled {
+		b.WriteString(statusOK.Render("● enabled"))
+	} else {
+		b.WriteString(statusFail.Render("○ disabled"))
+	}
 	b.WriteString("\n")
 	b.WriteString(subtitleStyle.Render(m.selectedTask.Prompt))
 	b.WriteString("\n\n")
@@ -998,6 +1018,7 @@ func (m Model) renderOutput() string {
 
 	// Help
 	helpText := helpKeyStyle.Render("↑/↓") + helpDescStyle.Render(" scroll • ") +
+		helpKeyStyle.Render("t") + helpDescStyle.Render(" toggle • ") +
 		helpKeyStyle.Render("r") + helpDescStyle.Render(" refresh • ") +
 		helpKeyStyle.Render("esc") + helpDescStyle.Render(" back")
 	b.WriteString(helpText)
