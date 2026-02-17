@@ -46,10 +46,11 @@ Claude Tasks is a Go TUI application for scheduling Claude CLI tasks via cron ex
 cmd/claude-tasks/main.go   Entry point - CLI commands, initializes DB, starts scheduler, launches TUI
 internal/
   api/                     HTTP REST API server (chi router) for mobile/remote access
-  tui/                     Bubble Tea TUI (views: list, add, edit, output, settings)
+  tui/                     Bubble Tea TUI (views: list, add, edit, run history, output, settings)
   scheduler/               Cron job scheduling (robfig/cron, 6-field with seconds)
-  executor/                Claude CLI subprocess execution, captures output
+  executor/                Claude CLI subprocess execution with dynamic flags, session IDs, captures output
   db/                      SQLite models (Task, TaskRun) and CRUD operations
+  logger/                  Structured JSON run logging to ~/.claude-tasks/logs/
   usage/                   Anthropic API usage tracking, threshold enforcement
   webhook/                 Discord and Slack webhook notifications
   version/                 Version info (set at build time via ldflags)
@@ -61,10 +62,13 @@ mobile/                    Expo/React Native app (connects to API server)
 
 1. Scheduler triggers task based on cron expression
 2. Executor checks API usage against threshold (default 80%)
-3. If under threshold, spawns Claude CLI with task prompt in configured working directory
-4. Captures output, creates TaskRun record
-5. Posts to Discord/Slack webhooks if configured
-6. Updates next run time
+3. Executor generates a UUID session ID
+4. Builds CLI args dynamically: `-p`, permission mode flag, model flag, `--session-id`, prompt
+5. Spawns Claude CLI in the task's working directory
+6. Captures output, creates TaskRun record with session ID
+7. Writes structured JSON log to `~/.claude-tasks/logs/<task_id>/`
+8. Posts to Discord/Slack webhooks if configured
+9. Updates next run time
 
 ### Key Dependencies
 
@@ -74,6 +78,7 @@ mobile/                    Expo/React Native app (connects to API server)
 - **charmbracelet/glamour** - Markdown rendering
 - **go-chi/chi/v5** - HTTP router for REST API
 - **robfig/cron/v3** - Cron scheduling (6-field: `second minute hour day month weekday`)
+- **lnquy/cron** - Cron expression to human-readable English
 - **mattn/go-sqlite3** - SQLite driver (CGO required)
 
 ### Data Storage
@@ -81,6 +86,7 @@ mobile/                    Expo/React Native app (connects to API server)
 - Default location: `~/.claude-tasks/`
 - Override with `CLAUDE_TASKS_DATA` environment variable
 - Database auto-migrates on startup
+- `logs/` directory contains structured JSON run logs
 - `daemon.pid` file tracks running daemon process
 
 ### Operating Modes
@@ -98,13 +104,13 @@ The `serve` command starts an HTTP server with these endpoints:
 ```
 GET    /api/v1/health              Health check
 GET    /api/v1/tasks               List all tasks
-POST   /api/v1/tasks               Create task
+POST   /api/v1/tasks               Create task (supports model, permission_mode)
 GET    /api/v1/tasks/{id}          Get task by ID
 PUT    /api/v1/tasks/{id}          Update task
 DELETE /api/v1/tasks/{id}          Delete task
 POST   /api/v1/tasks/{id}/toggle   Toggle enabled
 POST   /api/v1/tasks/{id}/run      Run immediately
-GET    /api/v1/tasks/{id}/runs     Get task run history
+GET    /api/v1/tasks/{id}/runs     Get task run history (includes session_id)
 GET    /api/v1/tasks/{id}/runs/latest  Get latest run
 GET    /api/v1/settings            Get settings
 PUT    /api/v1/settings            Update settings
@@ -127,6 +133,7 @@ The app requires the API server running (`claude-tasks serve`) and configured vi
 
 ## TUI Keybindings
 
+### Task List
 | Key | Action |
 |-----|--------|
 | `a` | Add task |
@@ -134,11 +141,42 @@ The app requires the API server running (`claude-tasks serve`) and configured vi
 | `d` | Delete task (with confirmation) |
 | `t` | Toggle enabled |
 | `r` | Run immediately |
-| `Enter` | View output |
+| `Enter` | View run history |
 | `s` | Settings |
 | `/` | Search/filter tasks |
-| `?` | Cron preset picker (in cron field) |
+| `?` | Toggle help |
 | `q` | Quit |
+
+### Run History
+| Key | Action |
+|-----|--------|
+| `Enter` | View full run output |
+| `o` | Observe running task (opens Terminal with `claude --resume`) |
+| `r` | Refresh |
+| `Esc` | Back |
+
+### Add/Edit Form
+| Key | Action |
+|-----|--------|
+| `Tab`/`Shift+Tab` | Navigate fields |
+| `Left/Right` | Toggle options (Model, Permission Mode, Task Type) |
+| `?` | Cron preset picker (in cron field) |
+| `Ctrl+S` | Save |
+| `Esc` | Cancel |
+
+## Task Configuration
+
+Each task has:
+- **Model** (`model`): `""` (default), `"opus"`, `"sonnet"`, `"haiku"` - maps to `--model` CLI flag
+- **Permission Mode** (`permission_mode`): `"bypassPermissions"` (default), `"default"`, `"acceptEdits"`, `"plan"` - maps to `--dangerously-skip-permissions` or `--permission-mode` CLI flag
+- **Session ID**: Auto-generated UUID per run, passed as `--session-id` to Claude CLI
+
+Constants defined in `internal/db/models.go`:
+```go
+var ModelAliases    = []string{"", "opus", "sonnet", "haiku"}
+var PermissionModes = []string{"bypassPermissions", "default", "acceptEdits", "plan"}
+const DefaultPermissionMode = "bypassPermissions"
+```
 
 ## Task Types
 
@@ -164,12 +202,17 @@ The app requires the API server running (`claude-tasks serve`) and configured vi
 - Error handling wraps with `fmt.Errorf("context: %w", err)` for chain unwrapping
 - Scheduler syncs from DB every 10 seconds to pick up external changes (API, another TUI)
 - Executor has a 30-minute timeout per task execution
+- Executor generates session IDs via `crypto/rand` (no external deps)
 - Usage client reads OAuth token from `~/.claude/.credentials.json` and caches responses for 30s
 - Webhook notifications support both Discord (embeds) and Slack (Block Kit) formats
+- Structured JSON logs written per run to `~/.claude-tasks/logs/<task_id>/`
 
 ## Database Schema
 
 Three tables: `tasks`, `task_runs`, `settings`. Schema auto-migrates on startup. Incremental migrations use `ALTER TABLE` with silent error handling for idempotency.
+
+Key columns added to `tasks`: `model`, `permission_mode`
+Key column added to `task_runs`: `session_id`
 
 ## CI/CD
 
