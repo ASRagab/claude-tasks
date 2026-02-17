@@ -3,11 +3,13 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os/exec"
 	"time"
 
 	"github.com/kylemclaren/claude-tasks/internal/db"
+	"github.com/kylemclaren/claude-tasks/internal/logger"
 	"github.com/kylemclaren/claude-tasks/internal/usage"
 	"github.com/kylemclaren/claude-tasks/internal/webhook"
 )
@@ -15,17 +17,19 @@ import (
 // Executor runs Claude CLI tasks
 type Executor struct {
 	db          *db.DB
+	logger      *logger.RunLogger
 	discord     *webhook.Discord
 	slack       *webhook.Slack
 	usageClient *usage.Client
 }
 
 // New creates a new executor
-func New(database *db.DB) *Executor {
+func New(database *db.DB, dataDir string) *Executor {
 	usageClient, _ := usage.NewClient() // Ignore error, will be nil if credentials not found
 
 	return &Executor{
 		db:          database,
+		logger:      logger.New(dataDir),
 		discord:     webhook.NewDiscord(),
 		slack:       webhook.NewSlack(),
 		usageClient: usageClient,
@@ -39,6 +43,14 @@ type Result struct {
 	Duration   time.Duration
 	Skipped    bool
 	SkipReason string
+}
+
+func generateUUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // Execute runs a Claude CLI command for the given task
@@ -68,6 +80,11 @@ func (e *Executor) Execute(ctx context.Context, task *db.Task) *Result {
 			run.EndedAt = &endTime
 			_ = e.db.CreateTaskRun(run)
 
+			// Log the run (best-effort, don't fail the execution)
+			if e.logger != nil {
+				_ = e.logger.WriteRunLog(task, run)
+			}
+
 			return &Result{
 				Skipped:    true,
 				SkipReason: skipReason,
@@ -76,20 +93,40 @@ func (e *Executor) Execute(ctx context.Context, task *db.Task) *Result {
 		}
 	}
 
+	// Generate session ID and build CLI args
+	sessionID := generateUUID()
+	args := []string{"-p"}
+
+	permMode := task.PermissionMode
+	if permMode == "" {
+		permMode = db.DefaultPermissionMode
+	}
+	if permMode == "bypassPermissions" {
+		args = append(args, "--dangerously-skip-permissions")
+	} else if permMode != "default" {
+		args = append(args, "--permission-mode", permMode)
+	}
+
+	if task.Model != "" {
+		args = append(args, "--model", task.Model)
+	}
+
+	args = append(args, "--session-id", sessionID)
+	args = append(args, task.Prompt)
+
 	// Create task run record
 	run := &db.TaskRun{
 		TaskID:    task.ID,
 		StartedAt: startTime,
 		Status:    db.RunStatusRunning,
+		SessionID: sessionID,
 	}
 	if err := e.db.CreateTaskRun(run); err != nil {
 		return &Result{Error: fmt.Errorf("failed to create run record: %w", err)}
 	}
 
 	// Build and execute command
-	// -p enables print mode (non-interactive), prompt is positional arg
-	// --dangerously-skip-permissions bypasses permission prompts for scheduled tasks
-	cmd := exec.CommandContext(ctx, "claude", "-p", "--dangerously-skip-permissions", task.Prompt)
+	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = task.WorkingDir
 
 	var stdout, stderr bytes.Buffer
@@ -110,6 +147,11 @@ func (e *Executor) Execute(ctx context.Context, task *db.Task) *Result {
 		run.Status = db.RunStatusCompleted
 	}
 	_ = e.db.UpdateTaskRun(run)
+
+	// Log the run (best-effort, don't fail the execution)
+	if e.logger != nil {
+		_ = e.logger.WriteRunLog(task, run)
+	}
 
 	// Update task's last run time
 	task.LastRunAt = &endTime

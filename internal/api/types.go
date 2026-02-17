@@ -11,6 +11,8 @@ type TaskRequest struct {
 	WorkingDir     string  `json:"working_dir"`
 	DiscordWebhook string  `json:"discord_webhook,omitempty"`
 	SlackWebhook   string  `json:"slack_webhook,omitempty"`
+	Model          string  `json:"model,omitempty"`
+	PermissionMode string  `json:"permission_mode,omitempty"`
 	Enabled        bool    `json:"enabled"`
 }
 
@@ -25,6 +27,8 @@ type TaskResponse struct {
 	WorkingDir     string     `json:"working_dir"`
 	DiscordWebhook string     `json:"discord_webhook,omitempty"`
 	SlackWebhook   string     `json:"slack_webhook,omitempty"`
+	Model          string     `json:"model,omitempty"`
+	PermissionMode string     `json:"permission_mode,omitempty"`
 	Enabled        bool       `json:"enabled"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
@@ -48,6 +52,7 @@ type TaskRunResponse struct {
 	Status     string     `json:"status"`
 	Output     string     `json:"output"`
 	Error      string     `json:"error,omitempty"`
+	SessionID  string     `json:"session_id,omitempty"`
 	DurationMs *int64     `json:"duration_ms,omitempty"`
 }
 

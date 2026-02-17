@@ -139,3 +139,39 @@ The app requires the API server running (`claude-tasks serve`) and configured vi
 | `/` | Search/filter tasks |
 | `?` | Cron preset picker (in cron field) |
 | `q` | Quit |
+
+## Task Types
+
+- **Recurring tasks**: Have a cron expression (`cron_expr`), scheduled via `robfig/cron` with 6-field format (seconds included): `second minute hour day month weekday`
+- **One-off tasks**: Empty `cron_expr`, optional `scheduled_at` timestamp. Auto-disable after execution. If no `scheduled_at`, run immediately.
+
+## Environment Variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `CLAUDE_TASKS_DATA` | Override data directory | `~/.claude-tasks` |
+
+## Build Requirements
+
+- **Go 1.24+**
+- **CGO_ENABLED=1** required (SQLite driver uses CGO via `mattn/go-sqlite3`)
+- Claude CLI must be installed and authenticated for task execution
+
+## Code Patterns
+
+- All packages under `internal/` follow single-responsibility: one primary type per package
+- Database operations use raw SQL (no ORM) with `database/sql`
+- Error handling wraps with `fmt.Errorf("context: %w", err)` for chain unwrapping
+- Scheduler syncs from DB every 10 seconds to pick up external changes (API, another TUI)
+- Executor has a 30-minute timeout per task execution
+- Usage client reads OAuth token from `~/.claude/.credentials.json` and caches responses for 30s
+- Webhook notifications support both Discord (embeds) and Slack (Block Kit) formats
+
+## Database Schema
+
+Three tables: `tasks`, `task_runs`, `settings`. Schema auto-migrates on startup. Incremental migrations use `ALTER TABLE` with silent error handling for idempotency.
+
+## CI/CD
+
+- **CI** (`.github/workflows/ci.yml`): Build + test + lint on push/PR to `main`
+- **Release** (`.github/workflows/release.yml`): Cross-platform builds (linux amd64/arm64, darwin amd64/arm64, windows amd64) on tag push `v*`, creates GitHub release with checksums

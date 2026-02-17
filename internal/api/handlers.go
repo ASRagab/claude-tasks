@@ -64,6 +64,8 @@ func (s *Server) CreateTask(w http.ResponseWriter, r *http.Request) {
 		WorkingDir:     req.WorkingDir,
 		DiscordWebhook: req.DiscordWebhook,
 		SlackWebhook:   req.SlackWebhook,
+		Model:          req.Model,
+		PermissionMode: req.PermissionMode,
 		Enabled:        req.Enabled,
 	}
 
@@ -146,6 +148,8 @@ func (s *Server) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	task.WorkingDir = req.WorkingDir
 	task.DiscordWebhook = req.DiscordWebhook
 	task.SlackWebhook = req.SlackWebhook
+	task.Model = req.Model
+	task.PermissionMode = req.PermissionMode
 	task.Enabled = req.Enabled
 
 	// Parse scheduled_at for one-off tasks
@@ -383,6 +387,8 @@ func (s *Server) taskToResponse(task *db.Task, status db.RunStatus) TaskResponse
 		WorkingDir:     task.WorkingDir,
 		DiscordWebhook: task.DiscordWebhook,
 		SlackWebhook:   task.SlackWebhook,
+		Model:          task.Model,
+		PermissionMode: task.PermissionMode,
 		Enabled:        task.Enabled,
 		CreatedAt:      task.CreatedAt,
 		UpdatedAt:      task.UpdatedAt,
@@ -404,6 +410,7 @@ func (s *Server) taskRunToResponse(run *db.TaskRun) TaskRunResponse {
 		Status:    string(run.Status),
 		Output:    run.Output,
 		Error:     run.Error,
+		SessionID: run.SessionID,
 	}
 	if run.EndedAt != nil {
 		durationMs := run.EndedAt.Sub(run.StartedAt).Milliseconds()

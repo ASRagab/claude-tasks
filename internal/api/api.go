@@ -19,11 +19,11 @@ type Server struct {
 }
 
 // NewServer creates a new API server
-func NewServer(database *db.DB, sched *scheduler.Scheduler) *Server {
+func NewServer(database *db.DB, sched *scheduler.Scheduler, dataDir string) *Server {
 	s := &Server{
 		db:        database,
 		scheduler: sched,
-		executor:  executor.New(database),
+		executor:  executor.New(database, dataDir),
 		router:    chi.NewRouter(),
 	}
 	s.setupRoutes()

@@ -12,6 +12,8 @@ type Task struct {
 	WorkingDir     string     `json:"working_dir"`
 	DiscordWebhook string     `json:"discord_webhook,omitempty"`
 	SlackWebhook   string     `json:"slack_webhook,omitempty"`
+	Model          string     `json:"model,omitempty"`
+	PermissionMode string     `json:"permission_mode,omitempty"`
 	Enabled        bool       `json:"enabled"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
@@ -33,6 +35,7 @@ type TaskRun struct {
 	Status    RunStatus  `json:"status"`
 	Output    string     `json:"output"`
 	Error     string     `json:"error,omitempty"`
+	SessionID string     `json:"session_id,omitempty"`
 }
 
 // RunStatus represents the status of a task run
@@ -44,3 +47,7 @@ const (
 	RunStatusCompleted RunStatus = "completed"
 	RunStatusFailed    RunStatus = "failed"
 )
+
+var ModelAliases    = []string{"", "opus", "sonnet", "haiku"}
+var PermissionModes = []string{"bypassPermissions", "default", "acceptEdits", "plan"}
+const DefaultPermissionMode = "bypassPermissions"

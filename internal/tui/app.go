@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	osExec "os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/kylemclaren/claude-tasks/internal/executor"
 	"github.com/kylemclaren/claude-tasks/internal/scheduler"
 	"github.com/kylemclaren/claude-tasks/internal/usage"
+	crondesc "github.com/lnquy/cron"
 	"github.com/robfig/cron/v3"
 )
 
@@ -34,6 +36,7 @@ const (
 	ViewOutput
 	ViewEdit
 	ViewSettings
+	ViewRunHistory
 )
 
 // KeyMap defines keybindings
@@ -134,16 +137,25 @@ type Model struct {
 	runNow       bool // For one-off: true = run immediately, false = schedule for later
 	scheduledAt  textinput.Model
 
+	modelIndex          int // index into db.ModelAliases
+	permissionModeIndex int // index into db.PermissionModes
+
 	// Cron helper
 	showCronHelper  bool
 	cronHelperIndex int
 	cronPresets     []cronPreset
+	cronDesc        *crondesc.ExpressionDescriptor
 
 	// Output view
 	selectedTask *db.Task
 	taskRuns     []*db.TaskRun
 	viewport     viewport.Model
 	mdRenderer   *glamour.TermRenderer
+
+	// Run history view
+	runHistoryTable table.Model
+	selectedRun     *db.TaskRun
+	sortedRuns      []*db.TaskRun
 
 	// Usage tracking
 	usageClient    *usage.Client
@@ -171,10 +183,12 @@ type cronPreset struct {
 const (
 	fieldName = iota
 	fieldPrompt
-	fieldTaskType      // "Recurring" or "One-off"
-	fieldCron          // Only shown for recurring tasks
-	fieldScheduleMode  // "Run Now" or "Schedule for" - only for one-off
-	fieldScheduledAt   // Datetime input - only for scheduled one-off
+	fieldTaskType       // "Recurring" or "One-off"
+	fieldModel          // Model alias toggle
+	fieldPermissionMode // Permission mode toggle
+	fieldCron           // Only shown for recurring tasks
+	fieldScheduleMode   // "Run Now" or "Schedule for" - only for one-off
+	fieldScheduledAt    // Datetime input - only for scheduled one-off
 	fieldWorkingDir
 	fieldDiscordWebhook
 	fieldSlackWebhook
@@ -219,8 +233,8 @@ func calculateTableColumns(width int) []table.Column {
 	if nameWidth < 12 {
 		nameWidth = 12
 	}
-	if scheduleWidth < 15 {
-		scheduleWidth = 15
+	if scheduleWidth < 25 {
+		scheduleWidth = 25
 	}
 	if nextWidth < 14 {
 		nextWidth = 14
@@ -240,7 +254,7 @@ func calculateTableColumns(width int) []table.Column {
 
 // NewModel creates a new TUI model
 // If daemonMode is true, scheduler can be nil and an executor will be created for direct task runs
-func NewModel(database *db.DB, sched *scheduler.Scheduler, daemonMode bool) Model {
+func NewModel(database *db.DB, sched *scheduler.Scheduler, daemonMode bool, dataDir string) Model {
 	// Spinner
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -311,10 +325,13 @@ func NewModel(database *db.DB, sched *scheduler.Scheduler, daemonMode bool) Mode
 		{name: "Monthly on 1st", expr: "0 0 9 1 * *", desc: "Runs on the 1st of each month at 9:00 AM"},
 	}
 
+	// Cron expression descriptor
+	cronDescriptor, _ := crondesc.NewDescriptor()
+
 	// Create executor for direct task runs (used in daemon mode)
 	var exec *executor.Executor
 	if daemonMode {
-		exec = executor.New(database)
+		exec = executor.New(database, dataDir)
 	}
 
 	m := Model{
@@ -330,6 +347,7 @@ func NewModel(database *db.DB, sched *scheduler.Scheduler, daemonMode bool) Mode
 		lastRunStatuses: make(map[int64]db.RunStatus),
 		searchInput:     searchInput,
 		cronPresets:     cronPresets,
+		cronDesc:        cronDescriptor,
 		formValidation:  make(map[int]string),
 		viewport:        viewport.New(80, 20),
 		mdRenderer:      renderer,
@@ -356,7 +374,7 @@ func (m *Model) initFormInputs() {
 	// Prompt uses textarea for multi-line input
 	m.promptInput = textarea.New()
 	m.promptInput.Placeholder = "Review recent changes and summarize..."
-	m.promptInput.CharLimit = 2000
+	m.promptInput.CharLimit = 20000
 	m.promptInput.SetWidth(inputWidth + 2)
 	m.promptInput.SetHeight(m.getTextareaHeight())
 	m.promptInput.ShowLineNumbers = false
@@ -364,6 +382,14 @@ func (m *Model) initFormInputs() {
 	// Task type placeholder (not a real input, just for indexing)
 	m.formInputs[fieldTaskType] = textinput.New()
 	m.formInputs[fieldTaskType].Width = inputWidth
+
+	// Model placeholder (not a real input, toggle field)
+	m.formInputs[fieldModel] = textinput.New()
+	m.formInputs[fieldModel].Width = inputWidth
+
+	// Permission mode placeholder (not a real input, toggle field)
+	m.formInputs[fieldPermissionMode] = textinput.New()
+	m.formInputs[fieldPermissionMode].Width = inputWidth
 
 	m.formInputs[fieldCron] = textinput.New()
 	m.formInputs[fieldCron].Placeholder = "0 * * * * * (every minute)"
@@ -406,6 +432,8 @@ func (m *Model) initFormInputs() {
 	// Reset task type state
 	m.isOneOff = false
 	m.runNow = true
+	m.modelIndex = 0
+	m.permissionModeIndex = 0
 }
 
 // getFormInputWidth calculates responsive input width
@@ -524,7 +552,7 @@ func (m *Model) getPrevFormField(current int) int {
 // shouldShowField returns true if the field should be shown based on current task type
 func (m *Model) shouldShowField(field int) bool {
 	switch field {
-	case fieldName, fieldPrompt, fieldTaskType, fieldWorkingDir, fieldDiscordWebhook, fieldSlackWebhook:
+	case fieldName, fieldPrompt, fieldTaskType, fieldModel, fieldPermissionMode, fieldWorkingDir, fieldDiscordWebhook, fieldSlackWebhook:
 		return true
 	case fieldCron:
 		return !m.isOneOff // Only for recurring tasks
@@ -600,6 +628,11 @@ func (m *Model) updateTable() {
 
 		// Format schedule column for one-off vs recurring
 		schedule := task.CronExpr
+		if !task.IsOneOff() {
+			if desc := m.cronToEnglish(task.CronExpr); desc != "" {
+				schedule = desc
+			}
+		}
 		if task.IsOneOff() {
 			if task.ScheduledAt != nil {
 				schedule = "Once: " + task.ScheduledAt.Format("Jan 02 15:04")
@@ -638,6 +671,17 @@ func formatTime(t time.Time) string {
 		return fmt.Sprintf("in %dh %dm", int(diff.Hours()), int(diff.Minutes())%60)
 	}
 	return t.Format("Jan 02 15:04")
+}
+
+func (m *Model) cronToEnglish(expr string) string {
+	if m.cronDesc == nil || expr == "" {
+		return ""
+	}
+	desc, err := m.cronDesc.ToDescription(expr, crondesc.Locale_en)
+	if err != nil {
+		return ""
+	}
+	return desc
 }
 
 func truncate(s string, max int) string {
@@ -740,6 +784,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateForm(msg)
 		case ViewOutput:
 			return m.updateOutput(msg)
+		case ViewRunHistory:
+			return m.updateRunHistory(msg)
 		case ViewSettings:
 			return m.updateSettings(msg)
 		}
@@ -777,6 +823,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Height = viewportHeight
 
 		m.help.Width = msg.Width
+
+		// Update run history table
+		runHistoryHeight := msg.Height - headerHeight - footerHeight - 8 // extra space for stats
+		if runHistoryHeight < minTableHeight {
+			runHistoryHeight = minTableHeight
+		}
+		m.runHistoryTable.SetHeight(runHistoryHeight)
+		m.runHistoryTable.SetWidth(tableWidth)
 
 		// Update form input widths
 		m.updateFormWidths(msg.Width)
@@ -867,8 +921,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskRunsLoadedMsg:
 		m.taskRuns = msg.runs
-		m.viewport.SetContent(m.renderOutputContent())
-		m.viewport.GotoTop()
+		if m.currentView == ViewRunHistory {
+			m.updateRunHistoryTable()
+		} else if m.currentView == ViewOutput && m.selectedRun != nil {
+			m.viewport.SetContent(m.renderSingleRunContent())
+			m.viewport.GotoTop()
+		} else {
+			m.viewport.SetContent(m.renderOutputContent())
+			m.viewport.GotoTop()
+		}
 
 	case errMsg:
 		m.setStatus("Error: "+msg.err.Error(), true)
@@ -1015,7 +1076,7 @@ func (m *Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			idx := m.table.Cursor()
 			if idx < len(tasksToUse) {
 				m.selectedTask = tasksToUse[idx]
-				m.currentView = ViewOutput
+				m.currentView = ViewRunHistory
 				return m, m.loadTaskRuns(m.selectedTask.ID)
 			}
 		}
@@ -1040,6 +1101,22 @@ func (m *Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.scheduledAt.SetValue(m.editingTask.ScheduledAt.Format("2006-01-02 15:04"))
 				} else {
 					m.runNow = true
+				}
+				// Set model index
+				m.modelIndex = 0
+				for i, alias := range db.ModelAliases {
+					if alias == m.editingTask.Model {
+						m.modelIndex = i
+						break
+					}
+				}
+				// Set permission mode index
+				m.permissionModeIndex = 0
+				for i, mode := range db.PermissionModes {
+					if mode == m.editingTask.PermissionMode {
+						m.permissionModeIndex = i
+						break
+					}
 				}
 				m.focusFormField(fieldName)
 				return m, textinput.Blink
@@ -1198,6 +1275,22 @@ func (m *Model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.validateForm()
 			return m, nil
 		}
+		if m.formFocus == fieldModel {
+			if msg.String() == "right" || msg.String() == "l" {
+				m.modelIndex = (m.modelIndex + 1) % len(db.ModelAliases)
+			} else {
+				m.modelIndex = (m.modelIndex - 1 + len(db.ModelAliases)) % len(db.ModelAliases)
+			}
+			return m, nil
+		}
+		if m.formFocus == fieldPermissionMode {
+			if msg.String() == "right" || msg.String() == "l" {
+				m.permissionModeIndex = (m.permissionModeIndex + 1) % len(db.PermissionModes)
+			} else {
+				m.permissionModeIndex = (m.permissionModeIndex - 1 + len(db.PermissionModes)) % len(db.PermissionModes)
+			}
+			return m, nil
+		}
 		if m.formFocus == fieldScheduleMode && m.isOneOff {
 			m.runNow = !m.runNow
 			m.validateForm()
@@ -1244,7 +1337,7 @@ func (m *Model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.promptInput, cmd = m.promptInput.Update(msg)
 	} else if m.formFocus == fieldScheduledAt {
 		m.scheduledAt, cmd = m.scheduledAt.Update(msg)
-	} else if m.formFocus != fieldTaskType && m.formFocus != fieldScheduleMode {
+	} else if m.formFocus != fieldTaskType && m.formFocus != fieldModel && m.formFocus != fieldPermissionMode && m.formFocus != fieldScheduleMode {
 		// Don't update toggle fields as text inputs
 		m.formInputs[m.formFocus], cmd = m.formInputs[m.formFocus].Update(msg)
 	}
@@ -1260,6 +1353,11 @@ func (m *Model) updateOutput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "esc", "q":
+		if m.selectedRun != nil {
+			m.selectedRun = nil
+			m.currentView = ViewRunHistory
+			return m, nil
+		}
 		m.currentView = ViewList
 		return m, nil
 	case "r":
@@ -1326,6 +1424,8 @@ func (m *Model) saveTask() tea.Cmd {
 			WorkingDir:     workingDir,
 			DiscordWebhook: discordWebhook,
 			SlackWebhook:   slackWebhook,
+			Model:          db.ModelAliases[m.modelIndex],
+			PermissionMode: db.PermissionModes[m.permissionModeIndex],
 			Enabled:        true,
 		}
 
@@ -1407,7 +1507,7 @@ func (m *Model) toggleTask(id int64) tea.Cmd {
 
 func (m *Model) loadTaskRuns(taskID int64) tea.Cmd {
 	return func() tea.Msg {
-		runs, err := m.db.GetTaskRuns(taskID, 20)
+		runs, err := m.db.GetTaskRuns(taskID, 50)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -1432,7 +1532,13 @@ func (m Model) View() string {
 	case ViewEdit:
 		content = m.renderForm("Edit Task")
 	case ViewOutput:
-		content = m.renderOutput()
+		if m.selectedRun != nil {
+			content = m.renderSingleRunOutput()
+		} else {
+			content = m.renderOutput()
+		}
+	case ViewRunHistory:
+		content = m.renderRunHistory()
 	case ViewSettings:
 		content = m.renderSettings()
 	}
@@ -1767,6 +1873,44 @@ func (m Model) renderForm(title string) string {
 		renderFocused(toggleContent, m.formFocus == fieldTaskType)
 	}
 
+	// Model toggle
+	b.WriteString(inputLabelStyle.Render("Model"))
+	b.WriteString("  ")
+	b.WriteString(subtitleStyle.Render("(←/→ to change)"))
+	b.WriteString("\n")
+	{
+		labels := []string{"Default", "Opus", "Sonnet", "Haiku"}
+		var parts []string
+		for i, label := range labels {
+			if i == m.modelIndex {
+				parts = append(parts, "["+label+"]")
+			} else {
+				parts = append(parts, label)
+			}
+		}
+		toggleContent := strings.Join(parts, "  ")
+		renderFocused(toggleContent, m.formFocus == fieldModel)
+	}
+
+	// Permission Mode toggle
+	b.WriteString(inputLabelStyle.Render("Permission Mode"))
+	b.WriteString("  ")
+	b.WriteString(subtitleStyle.Render("(←/→ to change)"))
+	b.WriteString("\n")
+	{
+		labels := []string{"Bypass", "Default", "Accept Edits", "Plan"}
+		var parts []string
+		for i, label := range labels {
+			if i == m.permissionModeIndex {
+				parts = append(parts, "["+label+"]")
+			} else {
+				parts = append(parts, label)
+			}
+		}
+		toggleContent := strings.Join(parts, "  ")
+		renderFocused(toggleContent, m.formFocus == fieldPermissionMode)
+	}
+
 	// Conditional fields based on task type
 	if m.isOneOff {
 		// Schedule Mode toggle for one-off tasks
@@ -1793,7 +1937,14 @@ func (m Model) renderForm(title string) string {
 		}
 	} else {
 		// Cron Expression for recurring tasks
-		renderLabel(fieldCron, "Cron Expression", "Press ? for presets")
+		cronVal := strings.TrimSpace(m.formInputs[fieldCron].Value())
+		cronHint := "Press ? for presets"
+		if cronVal != "" {
+			if desc := m.cronToEnglish(cronVal); desc != "" {
+				cronHint = desc
+			}
+		}
+		renderLabel(fieldCron, "Cron Expression", cronHint)
 		renderFocused(m.formInputs[fieldCron].View(), m.formFocus == fieldCron)
 	}
 
@@ -1985,10 +2136,367 @@ func (m Model) renderOutputContent() string {
 	return b.String()
 }
 
+// updateRunHistoryTable populates the run history table from loaded task runs
+func (m *Model) updateRunHistoryTable() {
+	// Sort runs: running first, then by start time descending
+	runs := make([]*db.TaskRun, len(m.taskRuns))
+	copy(runs, m.taskRuns)
+	sort.Slice(runs, func(i, j int) bool {
+		if runs[i].Status == db.RunStatusRunning && runs[j].Status != db.RunStatusRunning {
+			return true
+		}
+		if runs[j].Status == db.RunStatusRunning && runs[i].Status != db.RunStatusRunning {
+			return false
+		}
+		return runs[i].StartedAt.After(runs[j].StartedAt)
+	})
+	m.sortedRuns = runs
+
+	// Calculate responsive column widths — give Session and Preview the remaining space
+	availableWidth := m.width - 8 // table borders/padding
+	if availableWidth < 90 {
+		availableWidth = 90
+	}
+	fixedWidth := 4 + 6 + 20 + 10 + 12 // #, Status, Started, Duration, column separators
+	remaining := availableWidth - fixedWidth
+	// Split remaining: 30% to Session, 70% to Preview
+	sessionWidth := remaining * 30 / 100
+	if sessionWidth < 12 {
+		sessionWidth = 12
+	}
+	if sessionWidth > 38 {
+		sessionWidth = 38 // full UUID is 36 chars
+	}
+	previewWidth := remaining - sessionWidth
+	if previewWidth < 30 {
+		previewWidth = 30
+	}
+
+	columns := []table.Column{
+		{Title: "#", Width: 4},
+		{Title: "Status", Width: 6},
+		{Title: "Started", Width: 20},
+		{Title: "Duration", Width: 10},
+		{Title: "Session", Width: sessionWidth},
+		{Title: "Preview", Width: previewWidth},
+	}
+
+	rows := make([]table.Row, len(runs))
+	for i, run := range runs {
+		var status string
+		switch run.Status {
+		case db.RunStatusCompleted:
+			status = "OK"
+		case db.RunStatusFailed:
+			status = "FAIL"
+		case db.RunStatusRunning:
+			status = "RUN"
+		default:
+			status = "SKIP"
+		}
+
+		duration := "..."
+		if run.EndedAt != nil {
+			duration = run.EndedAt.Sub(run.StartedAt).Round(time.Second).String()
+		}
+
+		preview := run.Output
+		if run.Error != "" && preview == "" {
+			preview = run.Error
+		}
+		// Clean up preview: take first line, truncate
+		if idx := strings.IndexAny(preview, "\n\r"); idx >= 0 {
+			preview = preview[:idx]
+		}
+		preview = truncate(strings.TrimSpace(preview), previewWidth-2)
+
+		sessionIDShort := truncate(run.SessionID, sessionWidth-2)
+
+		rows[i] = table.Row{
+			fmt.Sprintf("%d", i+1),
+			status,
+			run.StartedAt.Format("2006-01-02 15:04:05"),
+			duration,
+			sessionIDShort,
+			preview,
+		}
+	}
+
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithRows(rows),
+		table.WithFocused(true),
+		table.WithHeight(m.height-headerHeight-footerHeight-8),
+	)
+
+	ts := table.DefaultStyles()
+	ts.Header = ts.Header.
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(dimTextColor).
+		BorderBottom(true).
+		Bold(true).
+		Foreground(accentColor)
+	ts.Selected = ts.Selected.
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(primaryColor).
+		Bold(true)
+	t.SetStyles(ts)
+
+	m.runHistoryTable = t
+}
+
+// updateRunHistory handles key events in the run history view
+func (m *Model) updateRunHistory(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch msg.String() {
+	case "enter":
+		idx := m.runHistoryTable.Cursor()
+		if idx < len(m.sortedRuns) {
+			m.selectedRun = m.sortedRuns[idx]
+			m.currentView = ViewOutput
+			m.viewport.SetContent(m.renderSingleRunContent())
+			m.viewport.GotoTop()
+			return m, nil
+		}
+	case "esc", "q":
+		m.currentView = ViewList
+		return m, nil
+	case "r":
+		return m, m.loadTaskRuns(m.selectedTask.ID)
+	case "o":
+		idx := m.runHistoryTable.Cursor()
+		if idx < len(m.sortedRuns) {
+			run := m.sortedRuns[idx]
+			if run.SessionID != "" && run.Status == db.RunStatusRunning {
+				// Build resume command with same permission mode as the task
+				resumeCmd := "claude"
+				permMode := m.selectedTask.PermissionMode
+				if permMode == "" {
+					permMode = db.DefaultPermissionMode
+				}
+				if permMode == "bypassPermissions" {
+					resumeCmd += " --dangerously-skip-permissions"
+				} else if permMode != "default" {
+					resumeCmd += " --permission-mode " + permMode
+				}
+				resumeCmd += " --resume " + run.SessionID
+
+				// Open in Terminal, cd to task's working directory first
+				script := fmt.Sprintf(`tell application "Terminal" to do script "cd %s && %s"`,
+					m.selectedTask.WorkingDir, resumeCmd)
+				cmd := osExec.Command("osascript", "-e", script)
+				_ = cmd.Start()
+			}
+		}
+		return m, nil
+	default:
+		m.runHistoryTable, cmd = m.runHistoryTable.Update(msg)
+	}
+
+	return m, cmd
+}
+
+// renderRunHistory renders the run history view
+func (m Model) renderRunHistory() string {
+	var b strings.Builder
+
+	// Header: task name + badge
+	b.WriteString(spriteIcon)
+	b.WriteString(" ")
+	b.WriteString(logoStyle.Render(m.selectedTask.Name))
+	b.WriteString("  ")
+	if m.selectedTask.Enabled {
+		b.WriteString(statusOK.Render("enabled"))
+	} else {
+		b.WriteString(statusFail.Render("disabled"))
+	}
+	b.WriteString("\n")
+
+	// Cron description
+	if !m.selectedTask.IsOneOff() && m.selectedTask.CronExpr != "" {
+		if desc := m.cronToEnglish(m.selectedTask.CronExpr); desc != "" {
+			b.WriteString(subtitleStyle.Render(desc))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n")
+
+	// Summary stats
+	if len(m.sortedRuns) > 0 {
+		total := len(m.sortedRuns)
+		successCount := 0
+		var totalDuration time.Duration
+		durationCount := 0
+		for _, run := range m.sortedRuns {
+			if run.Status == db.RunStatusCompleted {
+				successCount++
+			}
+			if run.EndedAt != nil {
+				totalDuration += run.EndedAt.Sub(run.StartedAt)
+				durationCount++
+			}
+		}
+		successRate := float64(0)
+		if total > 0 {
+			successRate = float64(successCount) / float64(total) * 100
+		}
+		avgDuration := "N/A"
+		if durationCount > 0 {
+			avgDuration = (totalDuration / time.Duration(durationCount)).Round(time.Second).String()
+		}
+
+		stats := fmt.Sprintf("Runs: %d  |  Success: %d/%d (%.0f%%)  |  Avg duration: %s",
+			total, successCount, total, successRate, avgDuration)
+		b.WriteString(subtitleStyle.Render(stats))
+		b.WriteString("\n\n")
+	}
+
+	// Table
+	if len(m.sortedRuns) == 0 {
+		b.WriteString(emptyBoxStyle.Render("No runs yet for this task"))
+	} else {
+		b.WriteString(m.runHistoryTable.View())
+	}
+
+	b.WriteString("\n\n")
+
+	// Help
+	helpText := helpKeyStyle.Render("enter") + helpDescStyle.Render(" view detail") +
+		helpDescStyle.Render(" | ") +
+		helpKeyStyle.Render("o") + helpDescStyle.Render(" observe") +
+		helpDescStyle.Render(" | ") +
+		helpKeyStyle.Render("r") + helpDescStyle.Render(" refresh") +
+		helpDescStyle.Render(" | ") +
+		helpKeyStyle.Render("esc") + helpDescStyle.Render(" back")
+	b.WriteString(helpText)
+
+	return b.String()
+}
+
+// renderSingleRunContent renders the content for a single run's output (used in viewport)
+func (m Model) renderSingleRunContent() string {
+	run := m.selectedRun
+	if run == nil {
+		return ""
+	}
+
+	var b strings.Builder
+
+	// Status badge
+	var statusBadge string
+	switch run.Status {
+	case db.RunStatusCompleted:
+		statusBadge = statusOK.Render("COMPLETED")
+	case db.RunStatusFailed:
+		statusBadge = statusFail.Render("FAILED")
+	case db.RunStatusRunning:
+		statusBadge = statusRunning.Render("RUNNING")
+	default:
+		statusBadge = statusPending.Render("PENDING")
+	}
+	b.WriteString(statusBadge)
+	b.WriteString("\n\n")
+
+	// Timestamps
+	b.WriteString(inputLabelStyle.Render("Started: "))
+	b.WriteString(run.StartedAt.Format("2006-01-02 15:04:05"))
+	b.WriteString("\n")
+
+	if run.EndedAt != nil {
+		b.WriteString(inputLabelStyle.Render("Ended:   "))
+		b.WriteString(run.EndedAt.Format("2006-01-02 15:04:05"))
+		b.WriteString("\n")
+
+		duration := run.EndedAt.Sub(run.StartedAt).Round(time.Millisecond)
+		b.WriteString(inputLabelStyle.Render("Duration: "))
+		b.WriteString(duration.String())
+		b.WriteString("\n")
+	}
+
+	if run.SessionID != "" {
+		b.WriteString(inputLabelStyle.Render("Session: "))
+		b.WriteString(run.SessionID)
+		b.WriteString("\n")
+		b.WriteString(subtitleStyle.Render("  Resume: claude --resume " + run.SessionID))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", 60)))
+	b.WriteString("\n\n")
+
+	// Output
+	if run.Output != "" {
+		if m.mdRenderer != nil {
+			rendered, err := m.mdRenderer.Render(run.Output)
+			if err == nil {
+				b.WriteString(rendered)
+			} else {
+				b.WriteString(run.Output)
+				b.WriteString("\n")
+			}
+		} else {
+			b.WriteString(run.Output)
+			b.WriteString("\n")
+		}
+	}
+
+	// Error
+	if run.Error != "" {
+		b.WriteString("\n")
+		b.WriteString(statusFail.Render("Error: "))
+		b.WriteString(run.Error)
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+// renderSingleRunOutput renders the full output view for a single selected run
+func (m Model) renderSingleRunOutput() string {
+	var b strings.Builder
+
+	b.WriteString(spriteIcon)
+	b.WriteString(" ")
+	b.WriteString(logoStyle.Render(m.selectedTask.Name))
+	b.WriteString("  ")
+
+	// Status badge for the selected run
+	if m.selectedRun != nil {
+		switch m.selectedRun.Status {
+		case db.RunStatusCompleted:
+			b.WriteString(statusOK.Render("COMPLETED"))
+		case db.RunStatusFailed:
+			b.WriteString(statusFail.Render("FAILED"))
+		case db.RunStatusRunning:
+			b.WriteString(statusRunning.Render("RUNNING"))
+		default:
+			b.WriteString(statusPending.Render("PENDING"))
+		}
+	}
+	b.WriteString("\n")
+	if m.selectedRun != nil {
+		b.WriteString(subtitleStyle.Render(m.selectedRun.StartedAt.Format("2006-01-02 15:04:05")))
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString(m.viewport.View())
+	b.WriteString("\n\n")
+
+	// Help
+	helpText := helpKeyStyle.Render("↑↓") + helpDescStyle.Render(" scroll") +
+		helpDescStyle.Render(" | ") +
+		helpKeyStyle.Render("esc") + helpDescStyle.Render(" back to runs")
+	b.WriteString(helpText)
+
+	return b.String()
+}
+
 // Run starts the TUI application
 // If daemonMode is true, scheduler can be nil (external daemon handles scheduling)
-func Run(database *db.DB, sched *scheduler.Scheduler, daemonMode bool) error {
-	m := NewModel(database, sched, daemonMode)
+func Run(database *db.DB, sched *scheduler.Scheduler, daemonMode bool, dataDir string) error {
+	m := NewModel(database, sched, daemonMode, dataDir)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err

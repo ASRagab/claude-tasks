@@ -93,6 +93,13 @@ func (db *DB) migrate() error {
 	// Migration: Add scheduled_at column for one-off tasks
 	_, _ = db.conn.Exec("ALTER TABLE tasks ADD COLUMN scheduled_at DATETIME")
 
+	// Migration: Add model and permission_mode columns for task configuration
+	_, _ = db.conn.Exec("ALTER TABLE tasks ADD COLUMN model TEXT DEFAULT ''")
+	_, _ = db.conn.Exec("ALTER TABLE tasks ADD COLUMN permission_mode TEXT DEFAULT ''")
+
+	// Migration: Add session_id column for task run tracking
+	_, _ = db.conn.Exec("ALTER TABLE task_runs ADD COLUMN session_id TEXT DEFAULT ''")
+
 	return nil
 }
 
@@ -134,9 +141,9 @@ func (db *DB) SetUsageThreshold(threshold float64) error {
 // CreateTask creates a new task
 func (db *DB) CreateTask(task *Task) error {
 	result, err := db.conn.Exec(`
-		INSERT INTO tasks (name, prompt, cron_expr, scheduled_at, working_dir, discord_webhook, slack_webhook, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, task.Name, task.Prompt, task.CronExpr, task.ScheduledAt, task.WorkingDir, task.DiscordWebhook, task.SlackWebhook, task.Enabled, time.Now(), time.Now())
+		INSERT INTO tasks (name, prompt, cron_expr, scheduled_at, working_dir, discord_webhook, slack_webhook, model, permission_mode, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, task.Name, task.Prompt, task.CronExpr, task.ScheduledAt, task.WorkingDir, task.DiscordWebhook, task.SlackWebhook, task.Model, task.PermissionMode, task.Enabled, time.Now(), time.Now())
 	if err != nil {
 		return err
 	}
@@ -153,9 +160,9 @@ func (db *DB) CreateTask(task *Task) error {
 func (db *DB) GetTask(id int64) (*Task, error) {
 	task := &Task{}
 	err := db.conn.QueryRow(`
-		SELECT id, name, prompt, cron_expr, scheduled_at, working_dir, discord_webhook, slack_webhook, enabled, created_at, updated_at, last_run_at, next_run_at
+		SELECT id, name, prompt, cron_expr, scheduled_at, working_dir, discord_webhook, slack_webhook, model, permission_mode, enabled, created_at, updated_at, last_run_at, next_run_at
 		FROM tasks WHERE id = ?
-	`, id).Scan(&task.ID, &task.Name, &task.Prompt, &task.CronExpr, &task.ScheduledAt, &task.WorkingDir, &task.DiscordWebhook, &task.SlackWebhook, &task.Enabled, &task.CreatedAt, &task.UpdatedAt, &task.LastRunAt, &task.NextRunAt)
+	`, id).Scan(&task.ID, &task.Name, &task.Prompt, &task.CronExpr, &task.ScheduledAt, &task.WorkingDir, &task.DiscordWebhook, &task.SlackWebhook, &task.Model, &task.PermissionMode, &task.Enabled, &task.CreatedAt, &task.UpdatedAt, &task.LastRunAt, &task.NextRunAt)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +172,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 // ListTasks retrieves all tasks
 func (db *DB) ListTasks() ([]*Task, error) {
 	rows, err := db.conn.Query(`
-		SELECT id, name, prompt, cron_expr, scheduled_at, working_dir, discord_webhook, slack_webhook, enabled, created_at, updated_at, last_run_at, next_run_at
+		SELECT id, name, prompt, cron_expr, scheduled_at, working_dir, discord_webhook, slack_webhook, model, permission_mode, enabled, created_at, updated_at, last_run_at, next_run_at
 		FROM tasks ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -176,7 +183,7 @@ func (db *DB) ListTasks() ([]*Task, error) {
 	var tasks []*Task
 	for rows.Next() {
 		task := &Task{}
-		err := rows.Scan(&task.ID, &task.Name, &task.Prompt, &task.CronExpr, &task.ScheduledAt, &task.WorkingDir, &task.DiscordWebhook, &task.SlackWebhook, &task.Enabled, &task.CreatedAt, &task.UpdatedAt, &task.LastRunAt, &task.NextRunAt)
+		err := rows.Scan(&task.ID, &task.Name, &task.Prompt, &task.CronExpr, &task.ScheduledAt, &task.WorkingDir, &task.DiscordWebhook, &task.SlackWebhook, &task.Model, &task.PermissionMode, &task.Enabled, &task.CreatedAt, &task.UpdatedAt, &task.LastRunAt, &task.NextRunAt)
 		if err != nil {
 			return nil, err
 		}
@@ -189,9 +196,9 @@ func (db *DB) ListTasks() ([]*Task, error) {
 func (db *DB) UpdateTask(task *Task) error {
 	task.UpdatedAt = time.Now()
 	_, err := db.conn.Exec(`
-		UPDATE tasks SET name = ?, prompt = ?, cron_expr = ?, scheduled_at = ?, working_dir = ?, discord_webhook = ?, slack_webhook = ?, enabled = ?, updated_at = ?, last_run_at = ?, next_run_at = ?
+		UPDATE tasks SET name = ?, prompt = ?, cron_expr = ?, scheduled_at = ?, working_dir = ?, discord_webhook = ?, slack_webhook = ?, model = ?, permission_mode = ?, enabled = ?, updated_at = ?, last_run_at = ?, next_run_at = ?
 		WHERE id = ?
-	`, task.Name, task.Prompt, task.CronExpr, task.ScheduledAt, task.WorkingDir, task.DiscordWebhook, task.SlackWebhook, task.Enabled, task.UpdatedAt, task.LastRunAt, task.NextRunAt, task.ID)
+	`, task.Name, task.Prompt, task.CronExpr, task.ScheduledAt, task.WorkingDir, task.DiscordWebhook, task.SlackWebhook, task.Model, task.PermissionMode, task.Enabled, task.UpdatedAt, task.LastRunAt, task.NextRunAt, task.ID)
 	return err
 }
 
@@ -210,9 +217,9 @@ func (db *DB) ToggleTask(id int64) error {
 // CreateTaskRun creates a new task run record
 func (db *DB) CreateTaskRun(run *TaskRun) error {
 	result, err := db.conn.Exec(`
-		INSERT INTO task_runs (task_id, started_at, status, output, error)
-		VALUES (?, ?, ?, ?, ?)
-	`, run.TaskID, run.StartedAt, run.Status, run.Output, run.Error)
+		INSERT INTO task_runs (task_id, started_at, status, output, error, session_id)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, run.TaskID, run.StartedAt, run.Status, run.Output, run.Error, run.SessionID)
 	if err != nil {
 		return err
 	}
@@ -228,16 +235,16 @@ func (db *DB) CreateTaskRun(run *TaskRun) error {
 // UpdateTaskRun updates a task run
 func (db *DB) UpdateTaskRun(run *TaskRun) error {
 	_, err := db.conn.Exec(`
-		UPDATE task_runs SET ended_at = ?, status = ?, output = ?, error = ?
+		UPDATE task_runs SET ended_at = ?, status = ?, output = ?, error = ?, session_id = ?
 		WHERE id = ?
-	`, run.EndedAt, run.Status, run.Output, run.Error, run.ID)
+	`, run.EndedAt, run.Status, run.Output, run.Error, run.SessionID, run.ID)
 	return err
 }
 
 // GetTaskRuns retrieves runs for a task
 func (db *DB) GetTaskRuns(taskID int64, limit int) ([]*TaskRun, error) {
 	rows, err := db.conn.Query(`
-		SELECT id, task_id, started_at, ended_at, status, output, error
+		SELECT id, task_id, started_at, ended_at, status, output, error, session_id
 		FROM task_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT ?
 	`, taskID, limit)
 	if err != nil {
@@ -248,7 +255,7 @@ func (db *DB) GetTaskRuns(taskID int64, limit int) ([]*TaskRun, error) {
 	var runs []*TaskRun
 	for rows.Next() {
 		run := &TaskRun{}
-		err := rows.Scan(&run.ID, &run.TaskID, &run.StartedAt, &run.EndedAt, &run.Status, &run.Output, &run.Error)
+		err := rows.Scan(&run.ID, &run.TaskID, &run.StartedAt, &run.EndedAt, &run.Status, &run.Output, &run.Error, &run.SessionID)
 		if err != nil {
 			return nil, err
 		}
@@ -261,9 +268,9 @@ func (db *DB) GetTaskRuns(taskID int64, limit int) ([]*TaskRun, error) {
 func (db *DB) GetLatestTaskRun(taskID int64) (*TaskRun, error) {
 	run := &TaskRun{}
 	err := db.conn.QueryRow(`
-		SELECT id, task_id, started_at, ended_at, status, output, error
+		SELECT id, task_id, started_at, ended_at, status, output, error, session_id
 		FROM task_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 1
-	`, taskID).Scan(&run.ID, &run.TaskID, &run.StartedAt, &run.EndedAt, &run.Status, &run.Output, &run.Error)
+	`, taskID).Scan(&run.ID, &run.TaskID, &run.StartedAt, &run.EndedAt, &run.Status, &run.Output, &run.Error, &run.SessionID)
 	if err != nil {
 		return nil, err
 	}

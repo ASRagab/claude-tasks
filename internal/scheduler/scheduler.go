@@ -24,11 +24,11 @@ type Scheduler struct {
 }
 
 // New creates a new scheduler
-func New(database *db.DB) *Scheduler {
+func New(database *db.DB, dataDir string) *Scheduler {
 	return &Scheduler{
 		cron:         cron.New(cron.WithSeconds()),
 		db:           database,
-		executor:     executor.New(database),
+		executor:     executor.New(database, dataDir),
 		jobs:         make(map[int64]cron.EntryID),
 		cronExprs:    make(map[int64]string),
 		oneOffTimers: make(map[int64]*time.Timer),

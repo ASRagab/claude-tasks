@@ -85,7 +85,7 @@ func main() {
 		fmt.Printf("Daemon running (PID %d), TUI in client mode\n", daemonPID)
 	} else {
 		// No daemon, start our own scheduler
-		sched = scheduler.New(database)
+		sched = scheduler.New(database, dataDir)
 		if err := sched.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error starting scheduler: %v\n", err)
 			os.Exit(1)
@@ -94,7 +94,7 @@ func main() {
 	}
 
 	// Run TUI
-	if err := tui.Run(database, sched, daemonRunning); err != nil {
+	if err := tui.Run(database, sched, daemonRunning, dataDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
 		os.Exit(1)
 	}
@@ -130,7 +130,7 @@ func runDaemon() error {
 	}
 	defer database.Close()
 
-	sched := scheduler.New(database)
+	sched := scheduler.New(database, dataDir)
 	if err := sched.Start(); err != nil {
 		return fmt.Errorf("starting scheduler: %w", err)
 	}
@@ -172,13 +172,13 @@ func runServer() error {
 	}
 	defer database.Close()
 
-	sched := scheduler.New(database)
+	sched := scheduler.New(database, dataDir)
 	if err := sched.Start(); err != nil {
 		return fmt.Errorf("starting scheduler: %w", err)
 	}
 	defer sched.Stop()
 
-	server := api.NewServer(database, sched)
+	server := api.NewServer(database, sched, dataDir)
 
 	addr := fmt.Sprintf(":%d", *port)
 	fmt.Printf("claude-tasks API server starting on %s\n", addr)
