@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kylemclaren/claude-tasks/internal/db"
-	"github.com/kylemclaren/claude-tasks/internal/executor"
+	"github.com/ASRagab/claude-tasks/internal/db"
+	"github.com/ASRagab/claude-tasks/internal/executor"
 	"github.com/robfig/cron/v3"
 )
 

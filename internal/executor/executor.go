@@ -8,10 +8,10 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/kylemclaren/claude-tasks/internal/db"
-	"github.com/kylemclaren/claude-tasks/internal/logger"
-	"github.com/kylemclaren/claude-tasks/internal/usage"
-	"github.com/kylemclaren/claude-tasks/internal/webhook"
+	"github.com/ASRagab/claude-tasks/internal/db"
+	"github.com/ASRagab/claude-tasks/internal/logger"
+	"github.com/ASRagab/claude-tasks/internal/usage"
+	"github.com/ASRagab/claude-tasks/internal/webhook"
 )
 
 // Executor runs Claude CLI tasks

@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kylemclaren/claude-tasks/internal/version"
+	"github.com/ASRagab/claude-tasks/internal/version"
 )
 
 const (
-	repoOwner = "kylemclaren"
+	repoOwner = "ASRagab"
 	repoName  = "claude-tasks"
 )
 

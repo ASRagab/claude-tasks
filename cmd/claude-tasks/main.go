@@ -11,12 +11,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kylemclaren/claude-tasks/internal/api"
-	"github.com/kylemclaren/claude-tasks/internal/db"
-	"github.com/kylemclaren/claude-tasks/internal/scheduler"
-	"github.com/kylemclaren/claude-tasks/internal/tui"
-	"github.com/kylemclaren/claude-tasks/internal/upgrade"
-	"github.com/kylemclaren/claude-tasks/internal/version"
+	"github.com/ASRagab/claude-tasks/internal/api"
+	"github.com/ASRagab/claude-tasks/internal/db"
+	"github.com/ASRagab/claude-tasks/internal/scheduler"
+	"github.com/ASRagab/claude-tasks/internal/tui"
+	"github.com/ASRagab/claude-tasks/internal/upgrade"
+	"github.com/ASRagab/claude-tasks/internal/version"
 )
 
 func main() {
@@ -252,5 +252,5 @@ Serve Options:
 Environment Variables:
   CLAUDE_TASKS_DATA         Override data directory (default: ~/.claude-tasks)
 
-For more information, visit: https://github.com/kylemclaren/claude-tasks`)
+For more information, visit: https://github.com/ASRagab/claude-tasks`)
 }

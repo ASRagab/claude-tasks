@@ -1,4 +1,4 @@
-module github.com/kylemclaren/claude-tasks
+module github.com/ASRagab/claude-tasks
 
 go 1.24.0
 

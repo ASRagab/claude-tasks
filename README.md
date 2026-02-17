@@ -23,7 +23,7 @@ A TUI scheduler for running Claude tasks on a cron schedule. Built with [Bubble 
 ### Quick Install (Recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kylemclaren/claude-tasks/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ASRagab/claude-tasks/main/install.sh | bash
 ```
 
 This downloads the latest binary for your platform to `~/.local/bin/`.
@@ -32,7 +32,7 @@ This downloads the latest binary for your platform to `~/.local/bin/`.
 
 ```bash
 # Clone the repo
-git clone https://github.com/kylemclaren/claude-tasks.git
+git clone https://github.com/ASRagab/claude-tasks.git
 cd claude-tasks
 
 # Build

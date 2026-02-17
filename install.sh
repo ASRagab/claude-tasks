@@ -2,9 +2,9 @@
 set -e
 
 # claude-tasks installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/kylemclaren/claude-tasks/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/ASRagab/claude-tasks/main/install.sh | bash
 
-REPO="kylemclaren/claude-tasks"
+REPO="ASRagab/claude-tasks"
 INSTALL_DIR="${CLAUDE_TASKS_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Colors

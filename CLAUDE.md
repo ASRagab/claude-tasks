@@ -21,7 +21,7 @@ golangci-lint run --timeout=5m
 VERSION=$(git describe --tags --always)
 COMMIT=$(git rev-parse --short HEAD)
 DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-go build -ldflags="-s -w -X github.com/kylemclaren/claude-tasks/internal/version.Version=$VERSION -X github.com/kylemclaren/claude-tasks/internal/version.Commit=$COMMIT -X github.com/kylemclaren/claude-tasks/internal/version.BuildDate=$DATE" -o claude-tasks ./cmd/claude-tasks
+go build -ldflags="-s -w -X github.com/ASRagab/claude-tasks/internal/version.Version=$VERSION -X github.com/ASRagab/claude-tasks/internal/version.Commit=$COMMIT -X github.com/ASRagab/claude-tasks/internal/version.BuildDate=$DATE" -o claude-tasks ./cmd/claude-tasks
 ```
 
 ## CLI Commands

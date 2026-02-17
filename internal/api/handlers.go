@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/kylemclaren/claude-tasks/internal/db"
-	"github.com/kylemclaren/claude-tasks/internal/usage"
-	"github.com/kylemclaren/claude-tasks/internal/version"
+	"github.com/ASRagab/claude-tasks/internal/db"
+	"github.com/ASRagab/claude-tasks/internal/usage"
+	"github.com/ASRagab/claude-tasks/internal/version"
 	"github.com/robfig/cron/v3"
 )
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kylemclaren/claude-tasks/internal/db"
+	"github.com/ASRagab/claude-tasks/internal/db"
 )
 
 // Slack handles Slack webhook notifications
