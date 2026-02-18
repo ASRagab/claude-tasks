@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"os/exec"
 	"time"
@@ -16,23 +17,71 @@ import (
 
 // Executor runs Claude CLI tasks
 type Executor struct {
-	db          *db.DB
-	logger      *logger.RunLogger
-	discord     *webhook.Discord
-	slack       *webhook.Slack
-	usageClient *usage.Client
+	db             *db.DB
+	logger         *logger.RunLogger
+	discord        *webhook.Discord
+	slack          *webhook.Slack
+	usageClient    *usage.Client
+	usageClientErr error
+}
+
+const maxCapturedOutputBytes = 256 * 1024
+
+type cappedBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func newCappedBuffer(limit int) *cappedBuffer {
+	return &cappedBuffer{limit: limit}
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.limit <= 0 {
+		c.truncated = len(p) > 0
+		return len(p), nil
+	}
+
+	remaining := c.limit - c.buf.Len()
+	if remaining <= 0 {
+		c.truncated = len(p) > 0 || c.truncated
+		return len(p), nil
+	}
+
+	if len(p) > remaining {
+		if _, err := c.buf.Write(p[:remaining]); err != nil {
+			return 0, err
+		}
+		c.truncated = true
+		return len(p), nil
+	}
+
+	return c.buf.Write(p)
+}
+
+func (c *cappedBuffer) String() string {
+	content := c.buf.String()
+	if !c.truncated {
+		return content
+	}
+	if content == "" {
+		return "...[truncated]"
+	}
+	return content + "\n...[truncated]"
 }
 
 // New creates a new executor
 func New(database *db.DB, dataDir string) *Executor {
-	usageClient, _ := usage.NewClient() // Ignore error, will be nil if credentials not found
+	usageClient, usageClientErr := usage.NewClient()
 
 	return &Executor{
-		db:          database,
-		logger:      logger.New(dataDir),
-		discord:     webhook.NewDiscord(),
-		slack:       webhook.NewSlack(),
-		usageClient: usageClient,
+		db:             database,
+		logger:         logger.New(dataDir),
+		discord:        webhook.NewDiscord(),
+		slack:          webhook.NewSlack(),
+		usageClient:    usageClient,
+		usageClientErr: usageClientErr,
 	}
 }
 
@@ -45,12 +94,14 @@ type Result struct {
 	SkipReason string
 }
 
-func generateUUID() string {
+func generateUUID() (string, error) {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate session id: %w", err)
+	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
 // Execute runs a Claude CLI command for the given task
@@ -58,43 +109,62 @@ func (e *Executor) Execute(ctx context.Context, task *db.Task) *Result {
 	startTime := time.Now()
 
 	// Check usage threshold before running
-	if e.usageClient != nil {
-		threshold, _ := e.db.GetUsageThreshold()
-		ok, usageData, err := e.usageClient.CheckThreshold(threshold)
-		if err == nil && !ok {
-			// Usage is above threshold, skip the task
-			skipReason := fmt.Sprintf("Usage above threshold (%.0f%%): 5h=%.0f%%, 7d=%.0f%%. Resets in %s",
-				threshold,
-				usageData.FiveHour.Utilization,
-				usageData.SevenDay.Utilization,
-				usageData.FormatTimeUntilReset())
+	if e.usageClient == nil {
+		if e.usageClientErr != nil {
+			return &Result{Error: fmt.Errorf("usage threshold enforcement unavailable: %w", e.usageClientErr)}
+		}
+		return &Result{Error: fmt.Errorf("usage threshold enforcement unavailable")}
+	}
 
-			// Create a skipped run record
-			run := &db.TaskRun{
-				TaskID:    task.ID,
-				StartedAt: startTime,
-				Status:    db.RunStatusFailed,
-				Error:     skipReason,
-			}
-			endTime := time.Now()
-			run.EndedAt = &endTime
-			_ = e.db.CreateTaskRun(run)
+	threshold, thresholdErr := e.db.GetUsageThreshold()
+	if thresholdErr != nil {
+		return &Result{Error: fmt.Errorf("failed to enforce usage threshold: %w", thresholdErr)}
+	}
 
-			// Log the run (best-effort, don't fail the execution)
-			if e.logger != nil {
-				_ = e.logger.WriteRunLog(task, run)
-			}
+	ok, usageData, checkErr := e.usageClient.CheckThreshold(threshold)
+	if checkErr != nil {
+		return &Result{Error: fmt.Errorf("failed to enforce usage threshold: %w", checkErr)}
+	}
 
-			return &Result{
-				Skipped:    true,
-				SkipReason: skipReason,
-				Duration:   time.Since(startTime),
-			}
+	if !ok {
+		// Usage is above threshold, skip the task
+		skipReason := fmt.Sprintf("Usage above threshold (%.0f%%): 5h=%.0f%%, 7d=%.0f%%. Resets in %s",
+			threshold,
+			usageData.FiveHour.Utilization,
+			usageData.SevenDay.Utilization,
+			usageData.FormatTimeUntilReset())
+
+		// Create a skipped run record
+		run := &db.TaskRun{
+			TaskID:    task.ID,
+			StartedAt: startTime,
+			Status:    db.RunStatusFailed,
+			Error:     skipReason,
+		}
+		endTime := time.Now()
+		run.EndedAt = &endTime
+		if err := e.db.CreateTaskRun(run); err != nil {
+			return &Result{Error: fmt.Errorf("failed to create skipped run record: %w", err)}
+		}
+
+		var logErr error
+		if e.logger != nil {
+			logErr = e.logger.WriteRunLog(task, run)
+		}
+
+		return &Result{
+			Skipped:    true,
+			SkipReason: skipReason,
+			Duration:   time.Since(startTime),
+			Error:      logErr,
 		}
 	}
 
 	// Generate session ID and build CLI args
-	sessionID := generateUUID()
+	sessionID, err := generateUUID()
+	if err != nil {
+		return &Result{Error: err}
+	}
 	args := []string{"-p"}
 
 	permMode := task.PermissionMode
@@ -129,49 +199,65 @@ func (e *Executor) Execute(ctx context.Context, task *db.Task) *Result {
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = task.WorkingDir
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newCappedBuffer(maxCapturedOutputBytes)
+	stderr := newCappedBuffer(maxCapturedOutputBytes)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	execErr := cmd.Run()
 	endTime := time.Now()
 	duration := endTime.Sub(startTime)
 
 	// Update run record
 	run.EndedAt = &endTime
 	run.Output = stdout.String()
-	if err != nil {
+	if execErr != nil {
 		run.Status = db.RunStatusFailed
-		run.Error = fmt.Sprintf("%s\n%s", err.Error(), stderr.String())
+		run.Error = fmt.Sprintf("%s\n%s", execErr.Error(), stderr.String())
 	} else {
 		run.Status = db.RunStatusCompleted
 	}
-	_ = e.db.UpdateTaskRun(run)
 
-	// Log the run (best-effort, don't fail the execution)
+	var postRunErrs []error
+	if err := e.db.UpdateTaskRun(run); err != nil {
+		postRunErrs = append(postRunErrs, fmt.Errorf("failed to update run record: %w", err))
+	}
+
 	if e.logger != nil {
-		_ = e.logger.WriteRunLog(task, run)
+		if err := e.logger.WriteRunLog(task, run); err != nil {
+			postRunErrs = append(postRunErrs, fmt.Errorf("failed to write run log: %w", err))
+		}
 	}
 
 	// Update task's last run time
 	task.LastRunAt = &endTime
-	_ = e.db.UpdateTask(task)
+	if err := e.db.UpdateTask(task); err != nil {
+		postRunErrs = append(postRunErrs, fmt.Errorf("failed to update task last run time: %w", err))
+	}
 
 	// Send webhook notifications if configured
 	if task.DiscordWebhook != "" {
-		_ = e.discord.SendResult(task.DiscordWebhook, task, run)
+		if err := e.discord.SendResult(task.DiscordWebhook, task, run); err != nil {
+			postRunErrs = append(postRunErrs, fmt.Errorf("failed to send discord webhook: %w", err))
+		}
 	}
 	if task.SlackWebhook != "" {
-		_ = e.slack.SendResult(task.SlackWebhook, task, run)
+		if err := e.slack.SendResult(task.SlackWebhook, task, run); err != nil {
+			postRunErrs = append(postRunErrs, fmt.Errorf("failed to send slack webhook: %w", err))
+		}
 	}
 
 	result := &Result{
 		Output:   stdout.String(),
 		Duration: duration,
 	}
-	if err != nil {
-		result.Error = fmt.Errorf("%s: %s", err.Error(), stderr.String())
+
+	var resultErrs []error
+	if execErr != nil {
+		resultErrs = append(resultErrs, fmt.Errorf("%s: %s", execErr.Error(), stderr.String()))
 	}
+	resultErrs = append(resultErrs, postRunErrs...)
+	result.Error = errors.Join(resultErrs...)
 
 	return result
 }

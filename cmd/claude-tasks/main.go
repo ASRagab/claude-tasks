@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -119,7 +120,7 @@ func runDaemon() error {
 	}
 
 	// Write PID file
-	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0644); err != nil {
+	if err := writePIDFile(pidPath, os.Getpid()); err != nil {
 		return fmt.Errorf("writing PID file: %w", err)
 	}
 	defer os.Remove(pidPath)
@@ -189,24 +190,45 @@ func runServer() error {
 		Handler: server.Router(),
 	}
 
-	// Start server in goroutine
+	listener, err := createListener(addr)
+	if err != nil {
+		return fmt.Errorf("starting listener on %s: %w", addr, err)
+	}
+
+	serverErrCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-			fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
+		if serveErr := srv.Serve(listener); serveErr != nil && serveErr != http.ErrServerClosed {
+			serverErrCh <- serveErr
 		}
+		close(serverErrCh)
 	}()
 
-	// Wait for shutdown signal
+	// Wait for shutdown signal or server error
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	select {
+	case <-sigCh:
+		fmt.Println("\nShutting down server...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return srv.Shutdown(ctx)
+	case serveErr := <-serverErrCh:
+		if serveErr != nil {
+			return fmt.Errorf("server error: %w", serveErr)
+		}
+		return nil
+	}
+}
 
-	fmt.Println("\nShutting down server...")
+func writePIDFile(pidPath string, pid int) error {
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0755); err != nil {
+		return fmt.Errorf("ensuring pid directory: %w", err)
+	}
+	return os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", pid)), 0644)
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	return srv.Shutdown(ctx)
+func createListener(addr string) (net.Listener, error) {
+	return net.Listen("tcp", addr)
 }
 
 // isDaemonRunning checks if a daemon is running by reading PID file and checking process

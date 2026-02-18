@@ -262,42 +262,48 @@ func extractTarGz(tarPath string) (string, error) {
 }
 
 func replaceExecutable(oldPath, newPath string) error {
-	// On Windows, we can't replace a running executable directly
-	// On Unix, we can use rename
-
-	// First, backup the old executable
 	backupPath := oldPath + ".bak"
-	if err := os.Rename(oldPath, backupPath); err != nil {
-		return fmt.Errorf("failed to backup old executable: %w", err)
+	tmpPath := oldPath + ".new"
+	_ = os.Remove(tmpPath)
+
+	if err := copyFileWithMode(oldPath, backupPath, 0755); err != nil {
+		return fmt.Errorf("failed to create backup: %w", err)
 	}
 
-	// Copy new executable to the target path
-	newFile, err := os.Open(newPath)
-	if err != nil {
-		// Restore backup (best-effort)
-		_ = os.Rename(backupPath, oldPath)
-		return err
-	}
-	defer newFile.Close()
-
-	destFile, err := os.OpenFile(oldPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-	if err != nil {
-		// Restore backup (best-effort)
-		_ = os.Rename(backupPath, oldPath)
-		return err
-	}
-	defer destFile.Close()
-
-	if _, err := io.Copy(destFile, newFile); err != nil {
-		destFile.Close()
-		// Restore backup (best-effort)
-		_ = os.Remove(oldPath)
-		_ = os.Rename(backupPath, oldPath)
-		return err
+	if err := copyFileWithMode(newPath, tmpPath, 0755); err != nil {
+		_ = os.Remove(backupPath)
+		return fmt.Errorf("failed to stage new executable: %w", err)
 	}
 
-	// Remove backup (best-effort cleanup)
+	if err := os.Rename(tmpPath, oldPath); err != nil {
+		_ = os.Remove(tmpPath)
+		_ = copyFileWithMode(backupPath, oldPath, 0755)
+		return fmt.Errorf("failed to atomically replace executable: %w", err)
+	}
+
 	_ = os.Remove(backupPath)
-
 	return nil
+}
+
+func copyFileWithMode(srcPath, dstPath string, mode os.FileMode) error {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		return err
+	}
+	if err := dst.Sync(); err != nil {
+		_ = dst.Close()
+		return err
+	}
+	return dst.Close()
 }

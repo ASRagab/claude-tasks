@@ -8,6 +8,8 @@ export interface Task {
   working_dir: string;
   discord_webhook?: string;
   slack_webhook?: string;
+  model?: string;
+  permission_mode?: 'bypassPermissions' | 'default' | 'acceptEdits' | 'plan';
   enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -24,6 +26,8 @@ export interface TaskRequest {
   working_dir: string;
   discord_webhook?: string;
   slack_webhook?: string;
+  model?: string;
+  permission_mode?: 'bypassPermissions' | 'default' | 'acceptEdits' | 'plan';
   enabled: boolean;
 }
 

@@ -8,6 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ASRagab/claude-tasks/internal/db"
+	"github.com/ASRagab/claude-tasks/internal/executor"
+	"github.com/ASRagab/claude-tasks/internal/scheduler"
+	"github.com/ASRagab/claude-tasks/internal/usage"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/progress"
@@ -19,10 +23,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/ASRagab/claude-tasks/internal/db"
-	"github.com/ASRagab/claude-tasks/internal/executor"
-	"github.com/ASRagab/claude-tasks/internal/scheduler"
-	"github.com/ASRagab/claude-tasks/internal/usage"
 	crondesc "github.com/lnquy/cron"
 	"github.com/robfig/cron/v3"
 )
@@ -69,7 +69,7 @@ var keys = KeyMap{
 	Enter:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "view output")),
 	Save:     key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save")),
 	Back:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-	Quit:     key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+	Quit:     key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q/ctrl+c", "quit")),
 	Refresh:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 	Tab:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next field")),
 	Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
@@ -133,9 +133,9 @@ type Model struct {
 	formValidation map[int]string // Validation errors per field
 
 	// Task type (0 = recurring, 1 = one-off)
-	isOneOff     bool
-	runNow       bool // For one-off: true = run immediately, false = schedule for later
-	scheduledAt  textinput.Model
+	isOneOff    bool
+	runNow      bool // For one-off: true = run immediately, false = schedule for later
+	scheduledAt textinput.Model
 
 	modelIndex          int // index into db.ModelAliases
 	permissionModeIndex int // index into db.PermissionModes
@@ -170,6 +170,12 @@ type Model struct {
 	statusMsg   string
 	statusErr   bool
 	statusTimer int
+
+	// Polling state
+	refreshInFlight bool
+	refreshPending  bool
+	usageInFlight   bool
+	usagePending    bool
 }
 
 // cronPreset represents a cron schedule preset
@@ -206,6 +212,12 @@ const (
 	formFooterHeight   = 6
 	outputHeaderHeight = 5
 	outputFooterHeight = 3
+)
+
+const (
+	uiTickInterval      = time.Second
+	dataRefreshInterval = 5 * time.Second
+	usageRefreshEvery   = 30 * time.Second
 )
 
 // calculateTableColumns returns column definitions sized for the given width
@@ -354,6 +366,8 @@ func NewModel(database *db.DB, sched *scheduler.Scheduler, daemonMode bool, data
 		usageClient:     usageClient,
 		usageThreshold:  threshold,
 		thresholdInput:  thresholdInput,
+		refreshInFlight: true,
+		usageInFlight:   true,
 	}
 
 	m.initFormInputs()
@@ -692,7 +706,13 @@ func truncate(s string, max int) string {
 }
 
 // Messages
-type tasksLoadedMsg struct{ tasks []*db.Task }
+type tasksLoadedMsg struct {
+	tasks    []*db.Task
+	running  map[int64]bool
+	nextRuns map[int64]time.Time
+	statuses map[int64]db.RunStatus
+	err      error
+}
 type taskCreatedMsg struct{ task *db.Task }
 type taskDeletedMsg struct{ id int64 }
 type taskToggledMsg struct {
@@ -700,25 +720,26 @@ type taskToggledMsg struct {
 	enabled bool
 }
 type taskRunsLoadedMsg struct{ runs []*db.TaskRun }
-type runningTasksMsg struct{ running map[int64]bool }
 type usageUpdatedMsg struct {
 	data *usage.Response
 	err  error
 }
 type thresholdSavedMsg struct{ threshold float64 }
-type lastRunStatusesMsg struct{ statuses map[int64]db.RunStatus }
 type errMsg struct{ err error }
 type tickMsg time.Time
+type refreshTickMsg time.Time
+type usageTickMsg time.Time
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.loadTasks(),
 		m.spinner.Tick,
 		m.fetchUsage(),
-		tickCmd(),
+		uiTickCmd(),
+		refreshTickCmd(),
+		usageTickCmd(),
 	)
 }
-
 func (m *Model) fetchUsage() tea.Cmd {
 	return func() tea.Msg {
 		if m.usageClient == nil {
@@ -729,43 +750,76 @@ func (m *Model) fetchUsage() tea.Cmd {
 	}
 }
 
-func tickCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+func uiTickCmd() tea.Cmd {
+	return tea.Tick(uiTickInterval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
 
+func refreshTickCmd() tea.Cmd {
+	return tea.Tick(dataRefreshInterval, func(t time.Time) tea.Msg {
+		return refreshTickMsg(t)
+	})
+}
+
+func usageTickCmd() tea.Cmd {
+	return tea.Tick(usageRefreshEvery, func(t time.Time) tea.Msg {
+		return usageTickMsg(t)
+	})
+}
 func (m *Model) loadTasks() tea.Cmd {
 	return func() tea.Msg {
 		tasks, err := m.db.ListTasks()
 		if err != nil {
-			return errMsg{err}
+			return tasksLoadedMsg{err: err}
 		}
-		return tasksLoadedMsg{tasks}
-	}
-}
 
-func (m *Model) checkRunningTasks() tea.Cmd {
-	return func() tea.Msg {
-		running := make(map[int64]bool)
-		for _, task := range m.tasks {
-			latestRun, err := m.db.GetLatestTaskRun(task.ID)
-			if err == nil && latestRun.Status == db.RunStatusRunning {
-				running[task.ID] = true
+		nextRuns := make(map[int64]time.Time)
+		if m.scheduler != nil {
+			nextRuns = m.scheduler.GetAllNextRunTimes()
+		} else {
+			for _, task := range tasks {
+				if task.NextRunAt != nil && task.Enabled {
+					nextRuns[task.ID] = *task.NextRunAt
+				}
 			}
 		}
-		return runningTasksMsg{running}
+		statuses, err := m.db.GetLastRunStatuses()
+		if err != nil {
+			statuses = make(map[int64]db.RunStatus)
+		}
+		running := make(map[int64]bool)
+		for taskID, status := range statuses {
+			if status == db.RunStatusRunning {
+				running[taskID] = true
+			}
+		}
+
+		return tasksLoadedMsg{
+			tasks:    tasks,
+			running:  running,
+			nextRuns: nextRuns,
+			statuses: statuses,
+		}
 	}
 }
 
-func (m *Model) fetchLastRunStatuses() tea.Cmd {
-	return func() tea.Msg {
-		statuses, err := m.db.GetLastRunStatuses()
-		if err != nil {
-			return lastRunStatusesMsg{statuses: make(map[int64]db.RunStatus)}
-		}
-		return lastRunStatusesMsg{statuses: statuses}
+func (m *Model) requestTaskRefresh() tea.Cmd {
+	if m.refreshInFlight {
+		m.refreshPending = true
+		return nil
 	}
+	m.refreshInFlight = true
+	return m.loadTasks()
+}
+
+func (m *Model) requestUsageRefresh() tea.Cmd {
+	if m.usageInFlight {
+		m.usagePending = true
+		return nil
+	}
+	m.usageInFlight = true
+	return m.fetchUsage()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -773,7 +827,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" {
+		if msg.Type == tea.KeyCtrlC {
 			return m, tea.Quit
 		}
 
@@ -849,14 +903,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 	case tickMsg:
-		if m.scheduler != nil {
-			m.nextRuns = m.scheduler.GetAllNextRunTimes()
-		} else {
-			// In daemon mode, read next run times from DB
-			m.nextRuns = m.getNextRunsFromDB()
-		}
-		m.updateTable()
-
 		// Decrement status timer
 		if m.statusTimer > 0 {
 			m.statusTimer--
@@ -864,49 +910,65 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMsg = ""
 			}
 		}
+		cmds = append(cmds, uiTickCmd())
 
-		cmds = append(cmds, tickCmd(), m.checkRunningTasks(), m.fetchUsage(), m.fetchLastRunStatuses())
-
-	case tasksLoadedMsg:
-		m.tasks = msg.tasks
-		if m.scheduler != nil {
-			m.nextRuns = m.scheduler.GetAllNextRunTimes()
-		} else {
-			m.nextRuns = m.getNextRunsFromDB()
+	case refreshTickMsg:
+		cmds = append(cmds, refreshTickCmd())
+		if cmd := m.requestTaskRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
-		m.updateTable()
-		cmds = append(cmds, m.checkRunningTasks())
 
-	case runningTasksMsg:
-		m.runningTasks = msg.running
-		m.updateTable()
-
-	case lastRunStatusesMsg:
-		m.lastRunStatuses = msg.statuses
-		m.updateTable()
-
+	case usageTickMsg:
+		cmds = append(cmds, usageTickCmd())
+		if cmd := m.requestUsageRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case tasksLoadedMsg:
+		m.refreshInFlight = false
+		if msg.err != nil {
+			m.setStatus("Error: "+msg.err.Error(), true)
+		} else {
+			m.tasks = msg.tasks
+			m.nextRuns = msg.nextRuns
+			m.runningTasks = msg.running
+			m.lastRunStatuses = msg.statuses
+			m.updateTable()
+		}
+		if m.refreshPending {
+			m.refreshPending = false
+			if cmd := m.requestTaskRefresh(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 	case usageUpdatedMsg:
+		m.usageInFlight = false
 		if msg.err == nil {
 			m.usageData = msg.data
 			m.usageErr = nil
 		} else {
 			m.usageErr = msg.err
 		}
-
+		if m.usagePending {
+			m.usagePending = false
+			if cmd := m.requestUsageRefresh(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 	case thresholdSavedMsg:
 		m.usageThreshold = msg.threshold
 		m.setStatus(fmt.Sprintf("Threshold saved: %.0f%%", msg.threshold), false)
 		m.currentView = ViewList
-
 	case taskCreatedMsg:
 		m.setStatus("Task saved: "+msg.task.Name, false)
 		m.currentView = ViewList
-		cmds = append(cmds, m.loadTasks())
-
+		if cmd := m.requestTaskRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case taskDeletedMsg:
 		m.setStatus("Task deleted", false)
-		cmds = append(cmds, m.loadTasks())
-
+		if cmd := m.requestTaskRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case taskToggledMsg:
 		if msg.enabled {
 			m.setStatus("Task enabled", false)
@@ -917,7 +979,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedTask != nil && m.selectedTask.ID == msg.id {
 			m.selectedTask.Enabled = msg.enabled
 		}
-		cmds = append(cmds, m.loadTasks())
+		if cmd := m.requestTaskRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case taskRunsLoadedMsg:
 		m.taskRuns = msg.runs
@@ -2500,19 +2564,4 @@ func Run(database *db.DB, sched *scheduler.Scheduler, daemonMode bool, dataDir s
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
-}
-
-// getNextRunsFromDB reads next run times from DB (used when in daemon mode)
-func (m *Model) getNextRunsFromDB() map[int64]time.Time {
-	result := make(map[int64]time.Time)
-	tasks, err := m.db.ListTasks()
-	if err != nil {
-		return result
-	}
-	for _, task := range tasks {
-		if task.NextRunAt != nil && task.Enabled {
-			result[task.ID] = *task.NextRunAt
-		}
-	}
-	return result
 }

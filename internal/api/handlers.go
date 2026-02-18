@@ -1,15 +1,19 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/ASRagab/claude-tasks/internal/db"
 	"github.com/ASRagab/claude-tasks/internal/usage"
 	"github.com/ASRagab/claude-tasks/internal/version"
+	"github.com/go-chi/chi/v5"
 	"github.com/robfig/cron/v3"
 )
 
@@ -30,7 +34,11 @@ func (s *Server) ListTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get last run statuses for all tasks
-	statuses, _ := s.db.GetLastRunStatuses()
+	statuses, statusErr := s.db.GetLastRunStatuses()
+	if statusErr != nil {
+		log.Printf("api list tasks: failed to fetch last run statuses: %v", statusErr)
+		statuses = make(map[int64]db.RunStatus)
+	}
 
 	response := TaskListResponse{
 		Tasks: make([]TaskResponse, len(tasks)),
@@ -47,8 +55,7 @@ func (s *Server) ListTasks(w http.ResponseWriter, r *http.Request) {
 // CreateTask handles POST /api/v1/tasks
 func (s *Server) CreateTask(w http.ResponseWriter, r *http.Request) {
 	var req TaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.errorResponse(w, http.StatusBadRequest, "Invalid request body", err)
+	if !s.decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -86,7 +93,10 @@ func (s *Server) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	// Schedule the task if enabled
 	if task.Enabled && s.scheduler != nil {
-		_ = s.scheduler.AddTask(task)
+		if err := s.scheduler.AddTask(task); err != nil {
+			s.errorResponse(w, http.StatusInternalServerError, "Task created but scheduling failed", err)
+			return
+		}
 	}
 
 	s.jsonResponse(w, http.StatusCreated, s.taskToResponse(task, ""))
@@ -108,9 +118,12 @@ func (s *Server) GetTask(w http.ResponseWriter, r *http.Request) {
 
 	// Get last run status
 	var status db.RunStatus
-	lastRun, _ := s.db.GetLatestTaskRun(id)
-	if lastRun != nil {
+	lastRun, err := s.db.GetLatestTaskRun(id)
+	if err == nil {
 		status = lastRun.Status
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		s.errorResponse(w, http.StatusInternalServerError, "Failed to fetch latest run", err)
+		return
 	}
 
 	s.jsonResponse(w, http.StatusOK, s.taskToResponse(task, status))
@@ -131,8 +144,7 @@ func (s *Server) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req TaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.errorResponse(w, http.StatusBadRequest, "Invalid request body", err)
+	if !s.decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -171,7 +183,10 @@ func (s *Server) UpdateTask(w http.ResponseWriter, r *http.Request) {
 
 	// Update scheduler
 	if s.scheduler != nil {
-		_ = s.scheduler.UpdateTask(task)
+		if err := s.scheduler.UpdateTask(task); err != nil {
+			s.errorResponse(w, http.StatusInternalServerError, "Task updated but scheduling failed", err)
+			return
+		}
 	}
 
 	s.jsonResponse(w, http.StatusOK, s.taskToResponse(task, ""))
@@ -230,7 +245,10 @@ func (s *Server) ToggleTask(w http.ResponseWriter, r *http.Request) {
 
 	// Update scheduler
 	if s.scheduler != nil {
-		_ = s.scheduler.UpdateTask(task)
+		if err := s.scheduler.UpdateTask(task); err != nil {
+			s.errorResponse(w, http.StatusInternalServerError, "Task toggled but scheduling update failed", err)
+			return
+		}
 	}
 
 	s.jsonResponse(w, http.StatusOK, s.taskToResponse(task, ""))
@@ -250,8 +268,25 @@ func (s *Server) RunTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Execute asynchronously
-	go s.executor.ExecuteAsync(task)
+	if s.runConcurrency == 0 {
+		s.errorResponse(w, http.StatusServiceUnavailable, "Task execution queue is disabled", nil)
+		return
+	}
+
+	select {
+	case s.runSemaphore <- struct{}{}:
+		resultCh := s.executor.ExecuteAsync(task)
+		go func(taskID int64) {
+			result := <-resultCh
+			if result != nil && result.Error != nil {
+				log.Printf("api run task failed: task_id=%d err=%v", taskID, result.Error)
+			}
+			<-s.runSemaphore
+		}(task.ID)
+	default:
+		s.errorResponse(w, http.StatusServiceUnavailable, "Task execution queue is full", nil)
+		return
+	}
 
 	s.jsonResponse(w, http.StatusAccepted, SuccessResponse{
 		Success: true,
@@ -277,9 +312,16 @@ func (s *Server) GetTaskRuns(w http.ResponseWriter, r *http.Request) {
 	// Get limit from query params, default 20
 	limit := 20
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
-			limit = l
+		l, convErr := strconv.Atoi(limitStr)
+		if convErr != nil || l <= 0 {
+			s.errorResponse(w, http.StatusBadRequest, "limit must be a positive integer", nil)
+			return
 		}
+		if l > maxTaskRunsLimit {
+			s.errorResponse(w, http.StatusBadRequest, "limit exceeds maximum allowed value", nil)
+			return
+		}
+		limit = l
 	}
 
 	runs, err := s.db.GetTaskRuns(id, limit)
@@ -298,6 +340,29 @@ func (s *Server) GetTaskRuns(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.jsonResponse(w, http.StatusOK, response)
+}
+
+// GetTaskRun handles GET /api/v1/tasks/{id}/runs/{runID}
+func (s *Server) GetTaskRun(w http.ResponseWriter, r *http.Request) {
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, "Invalid task ID", err)
+		return
+	}
+
+	runID, err := strconv.ParseInt(chi.URLParam(r, "runID"), 10, 64)
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, "Invalid run ID", err)
+		return
+	}
+
+	run, err := s.db.GetTaskRun(taskID, runID)
+	if err != nil {
+		s.errorResponse(w, http.StatusNotFound, "Run not found", err)
+		return
+	}
+
+	s.jsonResponse(w, http.StatusOK, s.taskRunToResponse(run))
 }
 
 // GetLatestTaskRun handles GET /api/v1/tasks/{id}/runs/latest
@@ -319,7 +384,11 @@ func (s *Server) GetLatestTaskRun(w http.ResponseWriter, r *http.Request) {
 
 // GetSettings handles GET /api/v1/settings
 func (s *Server) GetSettings(w http.ResponseWriter, r *http.Request) {
-	threshold, _ := s.db.GetUsageThreshold()
+	threshold, err := s.db.GetUsageThreshold()
+	if err != nil {
+		s.errorResponse(w, http.StatusInternalServerError, "Failed to fetch settings", err)
+		return
+	}
 
 	s.jsonResponse(w, http.StatusOK, SettingsResponse{
 		UsageThreshold: threshold,
@@ -329,8 +398,7 @@ func (s *Server) GetSettings(w http.ResponseWriter, r *http.Request) {
 // UpdateSettings handles PUT /api/v1/settings
 func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req SettingsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.errorResponse(w, http.StatusBadRequest, "Invalid request body", err)
+	if !s.decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -443,17 +511,41 @@ func (s *Server) validateTaskRequest(req *TaskRequest) error {
 func (s *Server) jsonResponse(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("api response encode failed: status=%d err=%v", status, err)
+	}
 }
 
 func (s *Server) errorResponse(w http.ResponseWriter, status int, message string, err error) {
+	if err != nil {
+		log.Printf("api error: status=%d message=%q err=%v", status, message, err)
+	}
 	resp := ErrorResponse{
 		Error: message,
 	}
-	if err != nil {
-		resp.Details = err.Error()
-	}
 	s.jsonResponse(w, status, resp)
+}
+
+const maxJSONBodyBytes = 1 << 20 // 1 MiB
+const maxTaskRunsLimit = 200
+
+func (s *Server) decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(dst); err != nil {
+		s.errorResponse(w, http.StatusBadRequest, "Invalid request body", err)
+		return false
+	}
+
+	var extra struct{}
+	if err := dec.Decode(&extra); err != io.EOF {
+		s.errorResponse(w, http.StatusBadRequest, "Request body must contain a single JSON object", nil)
+		return false
+	}
+
+	return true
 }
 
 // Validation errors

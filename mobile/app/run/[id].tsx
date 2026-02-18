@@ -1,9 +1,10 @@
-import { View, Text, ScrollView, StyleSheet, Platform } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, Platform, ActivityIndicator } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { useTheme } from '../../lib/ThemeContext';
 import { getStatusColor, borderRadius, spacing } from '../../lib/theme';
 import { MarkdownViewer } from '../../components/MarkdownViewer';
+import { useTask, useTaskRun } from '../../hooks/useTasks';
 import type { TaskRun } from '../../lib/types';
 
 const useGlass = Platform.OS === 'ios' && typeof isLiquidGlassAvailable === 'function' && isLiquidGlassAvailable();
@@ -12,27 +13,16 @@ export default function RunOutputScreen() {
   const params = useLocalSearchParams();
   const { colors, shadows } = useTheme();
 
-  // Extract params with proper typing
-  const id = typeof params.id === 'string' ? params.id : Array.isArray(params.id) ? params.id[0] : '';
-  const taskName = typeof params.taskName === 'string' ? params.taskName : undefined;
-  const status = (typeof params.status === 'string' ? params.status : 'completed') as TaskRun['status'];
-  const output = typeof params.output === 'string' ? params.output : '';
-  const error = typeof params.error === 'string' ? params.error : undefined;
-  const started_at = typeof params.started_at === 'string' ? params.started_at : '';
-  const ended_at = typeof params.ended_at === 'string' ? params.ended_at : undefined;
-  const duration_ms = typeof params.duration_ms === 'string' ? parseInt(params.duration_ms, 10) : undefined;
+  const runIdParam = typeof params.id === 'string' ? params.id : Array.isArray(params.id) ? params.id[0] : '';
+  const taskIdParam = typeof params.taskId === 'string' ? params.taskId : Array.isArray(params.taskId) ? params.taskId[0] : '';
 
-  // Reconstruct run object from params
-  const run: TaskRun | null = id ? {
-    id: parseInt(id, 10),
-    task_id: 0,
-    status,
-    output,
-    error,
-    started_at,
-    ended_at,
-    duration_ms,
-  } : null;
+  const runId = parseInt(runIdParam, 10);
+  const taskId = parseInt(taskIdParam, 10);
+  const hasInvalidRoute = Number.isNaN(runId) || Number.isNaN(taskId);
+
+  const { data: task } = useTask(hasInvalidRoute ? 0 : taskId);
+  const { data: run, isLoading: runLoading } = useTaskRun(hasInvalidRoute ? 0 : taskId, hasInvalidRoute ? 0 : runId);
+  const taskName = task?.name;
 
   const formatDate = (dateStr?: string) => {
     if (!dateStr) return 'N/A';
@@ -72,6 +62,22 @@ export default function RunOutputScreen() {
     ...shadows.md,
   };
   const sectionStyle = useGlass ? glassSection : section;
+
+  if (hasInvalidRoute) {
+    return (
+      <View style={[styles.centered, { backgroundColor: colors.background }]}>
+        <Text style={[styles.errorText, { color: colors.error }]}>Run not found</Text>
+      </View>
+    );
+  }
+
+  if (runLoading) {
+    return (
+      <View style={[styles.centered, { backgroundColor: colors.background }]}>
+        <ActivityIndicator size="large" color={colors.orange} />
+      </View>
+    );
+  }
 
   if (!run) {
     return (

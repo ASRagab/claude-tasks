@@ -16,11 +16,12 @@ type Scheduler struct {
 	db           *db.DB
 	executor     *executor.Executor
 	jobs         map[int64]cron.EntryID
-	cronExprs    map[int64]string       // Track cron expressions to detect changes
-	oneOffTimers map[int64]*time.Timer  // Track one-off task timers
+	cronExprs    map[int64]string      // Track cron expressions to detect changes
+	oneOffTimers map[int64]*time.Timer // Track one-off task timers
 	mu           sync.RWMutex
 	running      bool
 	stopSync     chan struct{}
+	syncDone     chan struct{}
 }
 
 // New creates a new scheduler
@@ -45,6 +46,9 @@ func (s *Scheduler) Start() error {
 		return nil
 	}
 
+	s.stopSync = make(chan struct{})
+	s.syncDone = make(chan struct{})
+
 	// Load and schedule existing tasks
 	tasks, err := s.db.ListTasks()
 	if err != nil {
@@ -64,7 +68,7 @@ func (s *Scheduler) Start() error {
 	s.running = true
 
 	// Start background sync to pick up DB changes
-	go s.syncLoop()
+	go s.syncLoop(s.stopSync, s.syncDone)
 
 	return nil
 }
@@ -84,10 +88,19 @@ func (s *Scheduler) Stop() {
 	}
 	s.oneOffTimers = make(map[int64]*time.Timer)
 
+	stopSync := s.stopSync
+	syncDone := s.syncDone
+	s.stopSync = nil
+	s.syncDone = nil
 	s.mu.Unlock()
 
 	// Stop sync loop
-	close(s.stopSync)
+	if stopSync != nil {
+		close(stopSync)
+	}
+	if syncDone != nil {
+		<-syncDone
+	}
 
 	ctx := s.cron.Stop()
 	<-ctx.Done()
@@ -204,7 +217,12 @@ func (s *Scheduler) scheduleTaskLocked(task *db.Task) error {
 		if !freshTask.Enabled {
 			return
 		}
-		s.executor.ExecuteAsync(freshTask)
+		go func(runTask *db.Task) {
+			result := <-s.executor.ExecuteAsync(runTask)
+			if result != nil && result.Error != nil {
+				fmt.Printf("Failed to execute task %d: %v\n", taskID, result.Error)
+			}
+		}(freshTask)
 
 		// Update next run time in DB after execution
 		s.mu.RLock()
@@ -212,7 +230,9 @@ func (s *Scheduler) scheduleTaskLocked(task *db.Task) error {
 			entry := s.cron.Entry(eid)
 			if !entry.Next.IsZero() {
 				freshTask.NextRunAt = &entry.Next
-				_ = s.db.UpdateTask(freshTask)
+				if err := s.db.UpdateTask(freshTask); err != nil {
+					fmt.Printf("Failed to update task %d next run time: %v\n", taskID, err)
+				}
 			}
 		}
 		s.mu.RUnlock()
@@ -228,7 +248,12 @@ func (s *Scheduler) scheduleTaskLocked(task *db.Task) error {
 	entry := s.cron.Entry(entryID)
 	if !entry.Next.IsZero() {
 		task.NextRunAt = &entry.Next
-		_ = s.db.UpdateTask(task)
+		if err := s.db.UpdateTask(task); err != nil {
+			s.cron.Remove(entryID)
+			delete(s.jobs, task.ID)
+			delete(s.cronExprs, task.ID)
+			return fmt.Errorf("failed to persist next run time: %w", err)
+		}
 	}
 
 	return nil
@@ -265,13 +290,23 @@ func (s *Scheduler) scheduleOneOffTaskLocked(task *db.Task) error {
 
 	// Update NextRunAt in DB
 	task.NextRunAt = task.ScheduledAt
-	_ = s.db.UpdateTask(task)
+	if err := s.db.UpdateTask(task); err != nil {
+		timer.Stop()
+		delete(s.oneOffTimers, task.ID)
+		return fmt.Errorf("failed to persist one-off next run time: %w", err)
+	}
 
 	return nil
 }
 
 // executeOneOff runs a one-off task and disables it afterward
 func (s *Scheduler) executeOneOff(taskID int64) {
+	defer func() {
+		s.mu.Lock()
+		delete(s.oneOffTimers, taskID)
+		s.mu.Unlock()
+	}()
+
 	// Get fresh task data
 	task, err := s.db.GetTask(taskID)
 	if err != nil {
@@ -283,17 +318,18 @@ func (s *Scheduler) executeOneOff(taskID int64) {
 	}
 
 	// Execute the task
-	s.executor.ExecuteAsync(task)
+	result := <-s.executor.ExecuteAsync(task)
+	if result != nil && result.Error != nil {
+		fmt.Printf("Failed to execute one-off task %d: %v\n", taskID, result.Error)
+	}
 
 	// Auto-disable the task after execution
 	task.Enabled = false
 	task.NextRunAt = nil
-	_ = s.db.UpdateTask(task)
+	if err := s.db.UpdateTask(task); err != nil {
+		fmt.Printf("Failed to disable one-off task %d after execution: %v\n", taskID, err)
+	}
 
-	// Clean up timer reference
-	s.mu.Lock()
-	delete(s.oneOffTimers, taskID)
-	s.mu.Unlock()
 }
 
 // RunTaskNow executes a task immediately
@@ -304,20 +340,24 @@ func (s *Scheduler) RunTaskNow(taskID int64) error {
 	}
 
 	go func() {
-		s.executor.ExecuteAsync(task)
+		result := <-s.executor.ExecuteAsync(task)
+		if result != nil && result.Error != nil {
+			fmt.Printf("Failed to execute task %d: %v\n", taskID, result.Error)
+		}
 	}()
 
 	return nil
 }
 
 // syncLoop periodically syncs tasks from DB
-func (s *Scheduler) syncLoop() {
+func (s *Scheduler) syncLoop(stopSync <-chan struct{}, syncDone chan<- struct{}) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+	defer close(syncDone)
 
 	for {
 		select {
-		case <-s.stopSync:
+		case <-stopSync:
 			return
 		case <-ticker.C:
 			s.SyncTasks()
@@ -329,6 +369,7 @@ func (s *Scheduler) syncLoop() {
 func (s *Scheduler) SyncTasks() {
 	tasks, err := s.db.ListTasks()
 	if err != nil {
+		fmt.Printf("Failed to sync tasks from DB: %v\n", err)
 		return
 	}
 
@@ -371,7 +412,9 @@ func (s *Scheduler) SyncTasks() {
 
 		if task.Enabled && !isScheduled {
 			// Task should be scheduled but isn't
-			_ = s.scheduleTaskLocked(task)
+			if err := s.scheduleTaskLocked(task); err != nil {
+				fmt.Printf("Failed to schedule task %d during sync: %v\n", task.ID, err)
+			}
 		} else if !task.Enabled && isScheduled {
 			// Task shouldn't be scheduled but is - remove it
 			if entryID, ok := s.jobs[task.ID]; ok {
@@ -388,15 +431,21 @@ func (s *Scheduler) SyncTasks() {
 			s.cron.Remove(s.jobs[task.ID])
 			delete(s.jobs, task.ID)
 			delete(s.cronExprs, task.ID)
-			_ = s.scheduleTaskLocked(task)
+			if err := s.scheduleTaskLocked(task); err != nil {
+				fmt.Printf("Failed to reschedule task %d during sync: %v\n", task.ID, err)
+			}
 		} else if task.Enabled && hasOneOffTimer && !task.IsOneOff() {
 			// Task was converted from one-off to recurring, reschedule
 			s.oneOffTimers[task.ID].Stop()
 			delete(s.oneOffTimers, task.ID)
-			_ = s.scheduleTaskLocked(task)
+			if err := s.scheduleTaskLocked(task); err != nil {
+				fmt.Printf("Failed to reschedule task %d during sync: %v\n", task.ID, err)
+			}
 		} else if task.Enabled && hasCronJob && task.CronExpr != oldCronExpr {
 			// Cron expression changed, reschedule
-			_ = s.scheduleTaskLocked(task)
+			if err := s.scheduleTaskLocked(task); err != nil {
+				fmt.Printf("Failed to reschedule task %d during sync: %v\n", task.ID, err)
+			}
 		}
 	}
 }

@@ -1,13 +1,23 @@
-<img width="978" height="603" alt="Screenshot 2026-01-14 at 21 18 04" src="https://github.com/user-attachments/assets/476bb9c9-e4d6-4e16-8ee2-9364c6d07aa3" />
-
 # Claude Tasks
 
 A TUI scheduler for running Claude tasks on a cron schedule. Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
 > Fork of [kylemclaren/claude-tasks](https://github.com/kylemclaren/claude-tasks) with additional features for model selection, permission control, session observability, and structured logging.
 
-![Claude Tasks TUI](https://img.shields.io/badge/TUI-BubbleTea-ff69b4)
 ![Go](https://img.shields.io/badge/Go-1.24+-00ADD8)
+
+## Screenshots
+
+<table>
+  <tr>
+    <td><img src="assets/tasks_view.png" alt="Tasks view" /></td>
+    <td><img src="assets/new_task_view.png" alt="New task view" /></td>
+  </tr>
+  <tr>
+    <td><img src="assets/jobs_view.png" alt="Jobs view" /></td>
+    <td><img src="assets/detail_view.png" alt="Detail view" /></td>
+  </tr>
+</table>
 
 ## Features
 

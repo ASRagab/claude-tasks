@@ -2,6 +2,9 @@ package api
 
 import (
 	"net/http"
+	"os"
+	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -12,19 +15,35 @@ import (
 
 // Server represents the API server
 type Server struct {
-	db        *db.DB
-	scheduler *scheduler.Scheduler
-	executor  *executor.Executor
-	router    chi.Router
+	db              *db.DB
+	scheduler       *scheduler.Scheduler
+	executor        *executor.Executor
+	router          chi.Router
+	runConcurrency  int
+	runSemaphore    chan struct{}
 }
 
 // NewServer creates a new API server
 func NewServer(database *db.DB, sched *scheduler.Scheduler, dataDir string) *Server {
+	runConcurrency := 8
+	if env := strings.TrimSpace(os.Getenv("CLAUDE_TASKS_API_RUN_CONCURRENCY")); env != "" {
+		if parsed, err := strconv.Atoi(env); err == nil && parsed >= 0 {
+			runConcurrency = parsed
+		}
+	}
+
+	var runSemaphore chan struct{}
+	if runConcurrency > 0 {
+		runSemaphore = make(chan struct{}, runConcurrency)
+	}
+
 	s := &Server{
-		db:        database,
-		scheduler: sched,
-		executor:  executor.New(database, dataDir),
-		router:    chi.NewRouter(),
+		db:             database,
+		scheduler:      sched,
+		executor:       executor.New(database, dataDir),
+		router:         chi.NewRouter(),
+		runConcurrency: runConcurrency,
+		runSemaphore:   runSemaphore,
 	}
 	s.setupRoutes()
 	return s
@@ -39,6 +58,7 @@ func (s *Server) setupRoutes() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(CORS)
+	r.Use(Auth)
 
 	// API routes
 	r.Route("/api/v1", func(r chi.Router) {
@@ -56,6 +76,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/{id}/run", s.RunTask)
 			r.Get("/{id}/runs", s.GetTaskRuns)
 			r.Get("/{id}/runs/latest", s.GetLatestTaskRun)
+			r.Get("/{id}/runs/{runID}", s.GetTaskRun)
 		})
 
 		// Settings

@@ -13,6 +13,7 @@ import type {
 
 const API_BASE_KEY = 'claude_tasks_api_base';
 const AUTH_TOKEN_KEY = 'claude_tasks_auth_token';
+const REQUEST_TIMEOUT_MS = 15000;
 
 export async function getApiBase(): Promise<string | null> {
   try {
@@ -85,20 +86,54 @@ class ApiClient {
       headers['Authorization'] = `Bearer ${this.authToken}`;
     }
 
-    const response = await fetch(url, {
-      ...options,
-      headers: {
-        ...headers,
-        ...options.headers,
-      },
-    });
+    const requestController = new AbortController();
+    let timedOut = false;
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-      throw new Error(error.error || `HTTP ${response.status}`);
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      requestController.abort();
+    }, REQUEST_TIMEOUT_MS);
+
+    const upstreamSignal = options.signal;
+    const handleUpstreamAbort = () => requestController.abort();
+    let upstreamListenerAttached = false;
+
+    if (upstreamSignal) {
+      if (upstreamSignal.aborted) {
+        requestController.abort();
+      } else {
+        upstreamSignal.addEventListener('abort', handleUpstreamAbort, { once: true });
+        upstreamListenerAttached = true;
+      }
     }
 
-    return response.json();
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: requestController.signal,
+        headers: {
+          ...headers,
+          ...options.headers,
+        },
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+        throw new Error(error.error || `HTTP ${response.status}`);
+      }
+
+      return response.json();
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(timedOut ? 'Request timed out' : 'Request canceled');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+      if (upstreamSignal && upstreamListenerAttached) {
+        upstreamSignal.removeEventListener('abort', handleUpstreamAbort);
+      }
+    }
   }
 
   // Health
@@ -148,6 +183,11 @@ class ApiClient {
   async getLatestTaskRun(id: number): Promise<TaskRun> {
     return this.request(`/tasks/${id}/runs/latest`);
   }
+
+  async getTaskRun(taskId: number, runId: number): Promise<TaskRun> {
+    return this.request(`/tasks/${taskId}/runs/${runId}`);
+  }
+
 
   // Settings
   async getSettings(): Promise<Settings> {

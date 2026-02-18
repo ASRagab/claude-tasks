@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -82,25 +83,47 @@ func (db *DB) migrate() error {
 	INSERT OR IGNORE INTO settings (key, value) VALUES ('usage_threshold', '80');
 	`
 
-	_, err := db.conn.Exec(schema)
+	tx, err := db.conn.Begin()
 	if err != nil {
-		return err
+		return fmt.Errorf("begin migration transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	if _, err := tx.Exec(schema); err != nil {
+		return fmt.Errorf("apply base schema: %w", err)
 	}
 
-	// Migration: Add slack_webhook column if it doesn't exist
-	_, _ = db.conn.Exec("ALTER TABLE tasks ADD COLUMN slack_webhook TEXT DEFAULT ''")
+	alterStmts := []string{
+		"ALTER TABLE tasks ADD COLUMN slack_webhook TEXT DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN scheduled_at DATETIME",
+		"ALTER TABLE tasks ADD COLUMN model TEXT DEFAULT ''",
+		"ALTER TABLE tasks ADD COLUMN permission_mode TEXT DEFAULT ''",
+		"ALTER TABLE task_runs ADD COLUMN session_id TEXT DEFAULT ''",
+	}
 
-	// Migration: Add scheduled_at column for one-off tasks
-	_, _ = db.conn.Exec("ALTER TABLE tasks ADD COLUMN scheduled_at DATETIME")
+	for _, stmt := range alterStmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			if isDuplicateColumnError(err) {
+				continue
+			}
+			return fmt.Errorf("apply migration %q: %w", stmt, err)
+		}
+	}
 
-	// Migration: Add model and permission_mode columns for task configuration
-	_, _ = db.conn.Exec("ALTER TABLE tasks ADD COLUMN model TEXT DEFAULT ''")
-	_, _ = db.conn.Exec("ALTER TABLE tasks ADD COLUMN permission_mode TEXT DEFAULT ''")
-
-	// Migration: Add session_id column for task run tracking
-	_, _ = db.conn.Exec("ALTER TABLE task_runs ADD COLUMN session_id TEXT DEFAULT ''")
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration transaction: %w", err)
+	}
 
 	return nil
+}
+
+func isDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
 }
 
 // GetSetting retrieves a setting value
@@ -263,6 +286,20 @@ func (db *DB) GetTaskRuns(taskID int64, limit int) ([]*TaskRun, error) {
 	}
 	return runs, rows.Err()
 }
+
+// GetTaskRun retrieves a specific run for a task
+func (db *DB) GetTaskRun(taskID, runID int64) (*TaskRun, error) {
+	run := &TaskRun{}
+	err := db.conn.QueryRow(`
+		SELECT id, task_id, started_at, ended_at, status, output, error, session_id
+		FROM task_runs WHERE task_id = ? AND id = ?
+	`, taskID, runID).Scan(&run.ID, &run.TaskID, &run.StartedAt, &run.EndedAt, &run.Status, &run.Output, &run.Error, &run.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
 
 // GetLatestTaskRun retrieves the most recent run for a task
 func (db *DB) GetLatestTaskRun(taskID int64) (*TaskRun, error) {

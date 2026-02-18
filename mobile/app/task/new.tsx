@@ -74,6 +74,8 @@ export default function NewTaskScreen() {
       prompt: prompt.trim(),
       cron_expr: isOneOff ? '' : cronExpr.trim(),
       working_dir: workingDir.trim() || '.',
+      model: '',
+      permission_mode: 'bypassPermissions',
       enabled: true,
     };
 

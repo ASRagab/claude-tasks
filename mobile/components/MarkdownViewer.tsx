@@ -8,8 +8,20 @@ interface MarkdownViewerProps {
   content: string;
 }
 
+export const MAX_MARKDOWN_CONTENT_CHARS = 100000;
+
+export function clampMarkdownContent(content: string): string {
+  if (content.length <= MAX_MARKDOWN_CONTENT_CHARS) return content;
+
+  const omitted = content.length - MAX_MARKDOWN_CONTENT_CHARS;
+  return `${content.slice(0, MAX_MARKDOWN_CONTENT_CHARS)}\n\n---\n\n_Output truncated (${omitted} characters omitted)_`;
+}
+
+
 export function MarkdownViewer({ content }: MarkdownViewerProps) {
   const { colors, isDark } = useTheme();
+
+  const safeContent = useMemo(() => clampMarkdownContent(content), [content]);
 
   const styles = useMemo(() => StyleSheet.create({
     // Text styles
@@ -215,7 +227,7 @@ export function MarkdownViewer({ content }: MarkdownViewerProps) {
 
   return (
     <Markdown style={styles}>
-      {content}
+      {safeContent}
     </Markdown>
   );
 }

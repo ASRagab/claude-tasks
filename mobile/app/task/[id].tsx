@@ -21,6 +21,8 @@ export default function TaskDetailScreen() {
   const deleteMutation = useDeleteTask();
 
   const handleDelete = () => {
+    if (deleteMutation.isPending) return;
+
     Alert.alert(
       'Delete Task',
       `Are you sure you want to delete "${task?.name}"?`,
@@ -47,7 +49,7 @@ export default function TaskDetailScreen() {
   };
 
   const handleToggle = () => {
-    if (!task) return;
+    if (!task || toggleMutation.isPending) return;
     const willEnable = !task.enabled;
     toggleMutation.mutate(taskId, {
       onSuccess: () => {
@@ -60,7 +62,7 @@ export default function TaskDetailScreen() {
   };
 
   const handleRun = () => {
-    if (!task) return;
+    if (!task || runMutation.isPending) return;
     runMutation.mutate(taskId, {
       onSuccess: () => {
         showToast(`Running ${task.name}...`);
@@ -191,9 +193,11 @@ export default function TaskDetailScreen() {
           style={({ pressed }) => [
             styles.actionButton,
             { backgroundColor: colors.surfaceSecondary },
-            pressed && { backgroundColor: colors.border }
+            pressed && !toggleMutation.isPending && { backgroundColor: colors.border },
+            toggleMutation.isPending && { opacity: 0.5 }
           ]}
           onPress={handleToggle}
+          disabled={toggleMutation.isPending}
         >
           <Text style={[styles.actionButtonText, { color: colors.textSecondary }]}>
             {task.enabled ? 'Disable' : 'Enable'}
@@ -204,9 +208,11 @@ export default function TaskDetailScreen() {
           style={({ pressed }) => [
             styles.actionButton,
             { backgroundColor: colors.orange },
-            pressed && { backgroundColor: '#c46648' }
+            pressed && !runMutation.isPending && { backgroundColor: '#c46648' },
+            runMutation.isPending && { opacity: 0.5 }
           ]}
           onPress={handleRun}
+          disabled={runMutation.isPending}
         >
           <Text style={styles.runButtonText}>Run</Text>
         </Pressable>
@@ -215,9 +221,11 @@ export default function TaskDetailScreen() {
           style={({ pressed }) => [
             styles.actionButton,
             { backgroundColor: `${colors.error}15` },
-            pressed && { backgroundColor: `${colors.error}30` }
+            pressed && !deleteMutation.isPending && { backgroundColor: `${colors.error}30` },
+            deleteMutation.isPending && { opacity: 0.5 }
           ]}
           onPress={handleDelete}
+          disabled={deleteMutation.isPending}
         >
           <Text style={[styles.deleteButtonText, { color: colors.error }]}>Delete</Text>
         </Pressable>
@@ -236,13 +244,7 @@ export default function TaskDetailScreen() {
                   pathname: '/run/[id]',
                   params: {
                     id: run.id.toString(),
-                    taskName: task.name,
-                    status: run.status,
-                    output: run.output,
-                    error: run.error,
-                    started_at: run.started_at,
-                    ended_at: run.ended_at,
-                    duration_ms: run.duration_ms?.toString(),
+                    taskId: task.id.toString(),
                   },
                 });
               }}

@@ -22,7 +22,8 @@ const CRON_PRESETS = [
 export default function EditTaskScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const taskId = parseInt(id, 10);
-  const { data: task, isLoading } = useTask(taskId);
+  const hasInvalidTaskId = Number.isNaN(taskId);
+  const { data: task, isLoading } = useTask(hasInvalidTaskId ? 0 : taskId);
   const updateTask = useUpdateTask();
   const { colors } = useTheme();
   const { showToast } = useToast();
@@ -94,6 +95,8 @@ export default function EditTaskScreen() {
       prompt: prompt.trim(),
       cron_expr: isOneOff ? '' : cronExpr.trim(),
       working_dir: workingDir.trim() || '.',
+      model: task?.model ?? '',
+      permission_mode: task?.permission_mode ?? 'bypassPermissions',
       enabled: task?.enabled ?? true,
     };
 
@@ -116,10 +119,26 @@ export default function EditTaskScreen() {
     );
   };
 
-  if (isLoading || !initialized) {
+  if (hasInvalidTaskId) {
+    return (
+      <View style={[styles.centered, { backgroundColor: colors.background }]}>
+        <Text style={[styles.errorText, { color: colors.error }]}>Task not found</Text>
+      </View>
+    );
+  }
+
+  if (isLoading || (task && !initialized)) {
     return (
       <View style={[styles.centered, { backgroundColor: colors.background }]}>
         <ActivityIndicator size="large" color={colors.orange} />
+      </View>
+    );
+  }
+
+  if (!task) {
+    return (
+      <View style={[styles.centered, { backgroundColor: colors.background }]}>
+        <Text style={[styles.errorText, { color: colors.error }]}>Task not found</Text>
       </View>
     );
   }
@@ -430,6 +449,9 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  errorText: {
+    fontSize: 16,
   },
   form: {
     padding: 16,

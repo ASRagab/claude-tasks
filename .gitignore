@@ -19,3 +19,7 @@ coverage.out
 
 # Subprojects
 claude-usage-status/
+
+# AI
+.claude/
+docs/

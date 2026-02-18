@@ -50,33 +50,95 @@ interface ParsedField {
   raw: string;
 }
 
-function parseField(field: string): ParsedField {
+const MAX_CRON_FIELD_LENGTH = 128;
+const MAX_EXPANDED_FIELD_VALUES = 366;
+
+function normalizeWeekday(value: number): number {
+  return value === 7 ? 0 : value;
+}
+
+function parseNumericToken(token: string): number | null {
+  if (!/^\d+$/.test(token)) return null;
+  const value = Number.parseInt(token, 10);
+  if (!Number.isFinite(value)) return null;
+  return value;
+}
+
+function parseField(field: string, min: number, max: number, normalizeValue: (value: number) => number = (value) => value): ParsedField | null {
+  if (!field || field.length > MAX_CRON_FIELD_LENGTH) return null;
+
   if (field === '*') {
-    return { type: 'all', value: 0, raw: field };
+    return { type: 'all', value: min, raw: field };
   }
+
   if (field.startsWith('*/')) {
-    return { type: 'step', value: 0, step: parseInt(field.slice(2), 10), raw: field };
+    const stepRaw = parseNumericToken(field.slice(2));
+    if (stepRaw === null || stepRaw <= 0 || stepRaw > (max - min + 1)) return null;
+    return { type: 'step', value: min, step: stepRaw, raw: field };
   }
+
+  const addExpandedRange = (bucket: number[], start: number, end: number): boolean => {
+    if (start > end) return false;
+    if (start < min || end > max) return false;
+    if (end - start >= MAX_EXPANDED_FIELD_VALUES) return false;
+
+    for (let i = start; i <= end; i++) {
+      if (bucket.length >= MAX_EXPANDED_FIELD_VALUES) return false;
+      bucket.push(i);
+    }
+    return true;
+  };
+
   if (field.includes(',')) {
-    // Handle mixed list with ranges: "1,3,5" or "1-5,10,15"
     const values: number[] = [];
-    field.split(',').forEach(part => {
+    const parts = field.split(',');
+
+    for (const part of parts) {
+      if (!part) return null;
       if (part.includes('-')) {
-        const [start, end] = part.split('-').map(n => parseInt(n, 10));
-        for (let i = start; i <= end; i++) values.push(i);
+        const [startToken, endToken] = part.split('-');
+        const startRaw = parseNumericToken(startToken);
+        const endRaw = parseNumericToken(endToken);
+        if (startRaw === null || endRaw === null) return null;
+
+        const start = normalizeValue(startRaw);
+        const end = normalizeValue(endRaw);
+        if (!addExpandedRange(values, start, end)) return null;
       } else {
-        values.push(parseInt(part, 10));
+        const parsed = parseNumericToken(part);
+        if (parsed === null) return null;
+        const value = normalizeValue(parsed);
+        if (value < min || value > max) return null;
+        if (values.length >= MAX_EXPANDED_FIELD_VALUES) return null;
+        values.push(value);
       }
-    });
+    }
+
+    if (values.length === 0) return null;
     return { type: 'list', value: values[0], values, raw: field };
   }
+
   if (field.includes('-')) {
-    const [start, end] = field.split('-').map(n => parseInt(n, 10));
+    const [startToken, endToken] = field.split('-');
+    const startRaw = parseNumericToken(startToken);
+    const endRaw = parseNumericToken(endToken);
+    if (startRaw === null || endRaw === null) return null;
+
+    const start = normalizeValue(startRaw);
+    const end = normalizeValue(endRaw);
     const values: number[] = [];
-    for (let i = start; i <= end; i++) values.push(i);
-    return { type: 'range', value: start, values, raw: field };
+    if (!addExpandedRange(values, start, end)) return null;
+
+    return { type: 'range', value: values[0], values, raw: field };
   }
-  return { type: 'value', value: parseInt(field, 10), raw: field };
+
+  const singleRaw = parseNumericToken(field);
+  if (singleRaw === null) return null;
+
+  const singleValue = normalizeValue(singleRaw);
+  if (singleValue < min || singleValue > max) return null;
+
+  return { type: 'value', value: singleValue, raw: field };
 }
 
 function describeWeekdays(field: ParsedField): string | null {
@@ -164,6 +226,10 @@ function describeDayOfMonth(field: ParsedField): string | null {
 }
 
 export function cronToHuman(cronExpr: string): string {
+  if (cronExpr.length > 1000) {
+    return cronExpr;
+  }
+
   const parts = cronExpr.trim().split(/\s+/);
 
   // Handle both 5-field and 6-field cron expressions
@@ -178,12 +244,16 @@ export function cronToHuman(cronExpr: string): string {
     return cronExpr; // Return as-is if invalid
   }
 
-  const secField = parseField(second);
-  const minField = parseField(minute);
-  const hourField = parseField(hour);
-  const dayField = parseField(day);
-  const monthField = parseField(month);
-  const weekdayField = parseField(weekday);
+  const secField = parseField(second, 0, 59);
+  const minField = parseField(minute, 0, 59);
+  const hourField = parseField(hour, 0, 23);
+  const dayField = parseField(day, 1, 31);
+  const monthField = parseField(month, 1, 12);
+  const weekdayField = parseField(weekday, 0, 6, normalizeWeekday);
+
+  if (!secField || !minField || !hourField || !dayField || !monthField || !weekdayField) {
+    return cronExpr;
+  }
 
   // ============ FREQUENCY-BASED PATTERNS ============
 

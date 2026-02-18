@@ -1,12 +1,21 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '../lib/api';
-import type { TaskRequest } from '../lib/types';
+import type { TaskRequest, TaskRunsResponse } from '../lib/types';
+
+const ACTIVE_RUN_POLL_INTERVAL_MS = 3000;
+
+export function getTaskRunsRefetchInterval(data?: TaskRunsResponse): number | false {
+  const runs = data?.runs ?? [];
+  const hasActiveRun = runs.some((run) => run.status === 'pending' || run.status === 'running');
+  return hasActiveRun ? ACTIVE_RUN_POLL_INTERVAL_MS : false;
+}
 
 export function useTasks() {
   return useQuery({
     queryKey: ['tasks'],
     queryFn: () => apiClient.listTasks(),
     refetchInterval: 10000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -18,14 +27,24 @@ export function useTask(id: number) {
   });
 }
 
-export function useTaskRuns(id: number) {
+export function useTaskRuns(id: number, limit = 20) {
   return useQuery({
-    queryKey: ['tasks', id, 'runs'],
-    queryFn: () => apiClient.getTaskRuns(id),
+    queryKey: ['tasks', id, 'runs', limit],
+    queryFn: () => apiClient.getTaskRuns(id, limit),
     enabled: !!id,
-    refetchInterval: 5000,
+    refetchInterval: (query) => getTaskRunsRefetchInterval(query.state.data as TaskRunsResponse | undefined),
+    refetchIntervalInBackground: false,
   });
 }
+
+export function useTaskRun(taskId: number, runId: number) {
+  return useQuery({
+    queryKey: ['tasks', taskId, 'runs', runId],
+    queryFn: () => apiClient.getTaskRun(taskId, runId),
+    enabled: !!taskId && !!runId,
+  });
+}
+
 
 export function useCreateTask() {
   const queryClient = useQueryClient();
