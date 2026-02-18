@@ -5,7 +5,8 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { useCreateTask } from '../../hooks/useTasks';
 import { useTheme } from '../../lib/ThemeContext';
 import { useToast } from '../../lib/ToastContext';
-import { borderRadius, spacing } from '../../lib/theme';
+import { borderRadius } from '../../lib/theme';
+import type { TaskRequest } from '../../lib/types';
 
 const CRON_PRESETS = [
   { name: 'Every minute', expr: '0 * * * * *', desc: 'Runs at the start of every minute' },
@@ -19,15 +20,38 @@ const CRON_PRESETS = [
   { name: 'Monthly on 1st', expr: '0 0 9 1 * *', desc: 'Runs on the 1st of each month at 9:00 AM' },
 ];
 
+const MODEL_OPTIONS = [
+  { label: 'Default', value: '' },
+  { label: 'Opus', value: 'opus' },
+  { label: 'Sonnet', value: 'sonnet' },
+  { label: 'Haiku', value: 'haiku' },
+] as const;
+
+const PERMISSION_OPTIONS = [
+  { label: 'Bypass', value: 'bypassPermissions' },
+  { label: 'Default', value: 'default' },
+  { label: 'Accept Edits', value: 'acceptEdits' },
+  { label: 'Plan', value: 'plan' },
+] as const;
+
+
+type PermissionMode = NonNullable<TaskRequest['permission_mode']>;
+
+
+
 export default function NewTaskScreen() {
   const createTask = useCreateTask();
-  const { colors, shadows } = useTheme();
+  const { colors } = useTheme();
   const { showToast } = useToast();
 
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
   const [cronExpr, setCronExpr] = useState('');
   const [workingDir, setWorkingDir] = useState('.');
+  const [model, setModel] = useState('');
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>('bypassPermissions');
+  const [discordWebhook, setDiscordWebhook] = useState('');
+  const [slackWebhook, setSlackWebhook] = useState('');
   const [showCronPicker, setShowCronPicker] = useState(false);
 
   // One-off task state
@@ -68,14 +92,19 @@ export default function NewTaskScreen() {
       return;
     }
 
+    const trimmedDiscordWebhook = discordWebhook.trim();
+    const trimmedSlackWebhook = slackWebhook.trim();
+
     // Build request based on task type
-    const request: Parameters<typeof createTask.mutate>[0] = {
+    const request: TaskRequest = {
       name: name.trim(),
       prompt: prompt.trim(),
       cron_expr: isOneOff ? '' : cronExpr.trim(),
       working_dir: workingDir.trim() || '.',
-      model: '',
-      permission_mode: 'bypassPermissions',
+      model,
+      permission_mode: permissionMode,
+      discord_webhook: trimmedDiscordWebhook || undefined,
+      slack_webhook: trimmedSlackWebhook || undefined,
       enabled: true,
     };
 
@@ -159,6 +188,56 @@ export default function NewTaskScreen() {
                 One-off
               </Text>
             </Pressable>
+          </View>
+        </View>
+
+        <View style={styles.field}>
+          <Text style={[styles.label, { color: colors.textSecondary }]}>Model</Text>
+          <View style={[styles.segmentedControl, { backgroundColor: colors.surfaceSecondary }]}>
+            {MODEL_OPTIONS.map((option) => (
+              <Pressable
+                key={option.label}
+                style={[
+                  styles.segment,
+                  model === option.value && [styles.segmentActive, { backgroundColor: colors.surface }],
+                ]}
+                onPress={() => setModel(option.value)}
+              >
+                <Text
+                  style={[
+                    styles.segmentText,
+                    { color: model === option.value ? colors.textPrimary : colors.textMuted },
+                  ]}
+                >
+                  {option.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+
+        <View style={styles.field}>
+          <Text style={[styles.label, { color: colors.textSecondary }]}>Permission Mode</Text>
+          <View style={[styles.segmentedControl, { backgroundColor: colors.surfaceSecondary }]}>
+            {PERMISSION_OPTIONS.map((option) => (
+              <Pressable
+                key={option.label}
+                style={[
+                  styles.segment,
+                  permissionMode === option.value && [styles.segmentActive, { backgroundColor: colors.surface }],
+                ]}
+                onPress={() => setPermissionMode(option.value)}
+              >
+                <Text
+                  style={[
+                    styles.segmentText,
+                    { color: permissionMode === option.value ? colors.textPrimary : colors.textMuted },
+                  ]}
+                >
+                  {option.label}
+                </Text>
+              </Pressable>
+            ))}
           </View>
         </View>
 
@@ -251,6 +330,32 @@ export default function NewTaskScreen() {
             value={workingDir}
             onChangeText={setWorkingDir}
             placeholder="."
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+        </View>
+
+        <View style={styles.field}>
+          <Text style={[styles.label, { color: colors.textSecondary }]}>Discord Webhook (optional)</Text>
+          <TextInput
+            style={[styles.input, { borderColor: colors.border, backgroundColor: colors.surface, color: colors.textPrimary }]}
+            value={discordWebhook}
+            onChangeText={setDiscordWebhook}
+            placeholder="https://discord.com/api/webhooks/..."
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+        </View>
+
+        <View style={styles.field}>
+          <Text style={[styles.label, { color: colors.textSecondary }]}>Slack Webhook (optional)</Text>
+          <TextInput
+            style={[styles.input, { borderColor: colors.border, backgroundColor: colors.surface, color: colors.textPrimary }]}
+            value={slackWebhook}
+            onChangeText={setSlackWebhook}
+            placeholder="https://hooks.slack.com/services/..."
             placeholderTextColor={colors.textMuted}
             autoCapitalize="none"
             autoCorrect={false}

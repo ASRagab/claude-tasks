@@ -1,9 +1,15 @@
 package executor
 
 import (
+	"context"
+	"errors"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/ASRagab/claude-tasks/internal/db"
+	"github.com/ASRagab/claude-tasks/internal/testutil"
 )
 
 var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -74,5 +80,86 @@ func TestCappedBufferZeroLimitAlwaysTruncates(t *testing.T) {
 
 	if got := buf.String(); !strings.Contains(got, "...[truncated]") {
 		t.Fatalf("expected truncation marker, got %q", got)
+	}
+}
+
+func createTaskForExecutorTest(t *testing.T, database *db.DB, workingDir string) *db.Task {
+	t.Helper()
+
+	task := &db.Task{
+		Name:           "executor-test",
+		Prompt:         "echo test",
+		CronExpr:       "0 * * * * *",
+		WorkingDir:     workingDir,
+		Model:          "",
+		PermissionMode: db.DefaultPermissionMode,
+		Enabled:        true,
+	}
+
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	return task
+}
+
+func TestExecuteFailsClosedWhenUsageCheckUnavailable(t *testing.T) {
+	database, _ := testutil.NewTestDB(t)
+	task := createTaskForExecutorTest(t, database, t.TempDir())
+
+	exec := &Executor{
+		db:             database,
+		usageClientErr: errors.New("credentials not found"),
+	}
+
+	result := exec.Execute(context.Background(), task)
+	if result == nil || result.Error == nil {
+		t.Fatalf("expected usage enforcement error, got %#v", result)
+	}
+	if !strings.Contains(result.Error.Error(), "usage threshold enforcement unavailable") {
+		t.Fatalf("expected usage enforcement error, got %v", result.Error)
+	}
+
+	runs, err := database.GetTaskRuns(task.ID, 10)
+	if err != nil {
+		t.Fatalf("get task runs: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("expected no run records when usage check fails preflight, got %d", len(runs))
+	}
+}
+
+func TestExecuteAllowsRunWhenUsageCheckDisabled(t *testing.T) {
+	t.Setenv("CLAUDE_TASKS_DISABLE_USAGE_CHECK", "1")
+
+	database, dataDir := testutil.NewTestDB(t)
+	missingDir := filepath.Join(t.TempDir(), "missing")
+	task := createTaskForExecutorTest(t, database, missingDir)
+
+	exec := New(database, dataDir)
+	if !exec.disableUsageCheck {
+		t.Fatalf("expected usage checks to be disabled via env var")
+	}
+
+	result := exec.Execute(context.Background(), task)
+	if result == nil || result.Error == nil {
+		t.Fatalf("expected command execution failure for missing working directory")
+	}
+	if strings.Contains(result.Error.Error(), "usage threshold enforcement unavailable") {
+		t.Fatalf("expected usage checks to be bypassed when disabled, got %v", result.Error)
+	}
+	if !strings.Contains(result.Error.Error(), "no such file or directory") {
+		t.Fatalf("expected missing directory error, got %v", result.Error)
+	}
+
+	runs, err := database.GetTaskRuns(task.ID, 10)
+	if err != nil {
+		t.Fatalf("get task runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected one run record when execution proceeds, got %d", len(runs))
+	}
+	if runs[0].Status != db.RunStatusFailed {
+		t.Fatalf("expected failed status, got %s", runs[0].Status)
 	}
 }

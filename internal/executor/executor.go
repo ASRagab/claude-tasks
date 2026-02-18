@@ -6,7 +6,9 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/ASRagab/claude-tasks/internal/db"
@@ -17,12 +19,13 @@ import (
 
 // Executor runs Claude CLI tasks
 type Executor struct {
-	db             *db.DB
-	logger         *logger.RunLogger
-	discord        *webhook.Discord
-	slack          *webhook.Slack
-	usageClient    *usage.Client
-	usageClientErr error
+	db                *db.DB
+	logger            *logger.RunLogger
+	discord           *webhook.Discord
+	slack             *webhook.Slack
+	usageClient       *usage.Client
+	usageClientErr    error
+	disableUsageCheck bool
 }
 
 const maxCapturedOutputBytes = 256 * 1024
@@ -73,15 +76,22 @@ func (c *cappedBuffer) String() string {
 
 // New creates a new executor
 func New(database *db.DB, dataDir string) *Executor {
-	usageClient, usageClientErr := usage.NewClient()
+	disableUsageCheck := isTruthy(strings.TrimSpace(os.Getenv("CLAUDE_TASKS_DISABLE_USAGE_CHECK")))
+
+	var usageClient *usage.Client
+	var usageClientErr error
+	if !disableUsageCheck {
+		usageClient, usageClientErr = usage.NewClient()
+	}
 
 	return &Executor{
-		db:             database,
-		logger:         logger.New(dataDir),
-		discord:        webhook.NewDiscord(),
-		slack:          webhook.NewSlack(),
-		usageClient:    usageClient,
-		usageClientErr: usageClientErr,
+		db:                database,
+		logger:            logger.New(dataDir),
+		discord:           webhook.NewDiscord(),
+		slack:             webhook.NewSlack(),
+		usageClient:       usageClient,
+		usageClientErr:    usageClientErr,
+		disableUsageCheck: disableUsageCheck,
 	}
 }
 
@@ -104,59 +114,70 @@ func generateUUID() (string, error) {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
+func isTruthy(value string) bool {
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // Execute runs a Claude CLI command for the given task
 func (e *Executor) Execute(ctx context.Context, task *db.Task) *Result {
 	startTime := time.Now()
 
-	// Check usage threshold before running
-	if e.usageClient == nil {
-		if e.usageClientErr != nil {
-			return &Result{Error: fmt.Errorf("usage threshold enforcement unavailable: %w", e.usageClientErr)}
-		}
-		return &Result{Error: fmt.Errorf("usage threshold enforcement unavailable")}
-	}
-
-	threshold, thresholdErr := e.db.GetUsageThreshold()
-	if thresholdErr != nil {
-		return &Result{Error: fmt.Errorf("failed to enforce usage threshold: %w", thresholdErr)}
-	}
-
-	ok, usageData, checkErr := e.usageClient.CheckThreshold(threshold)
-	if checkErr != nil {
-		return &Result{Error: fmt.Errorf("failed to enforce usage threshold: %w", checkErr)}
-	}
-
-	if !ok {
-		// Usage is above threshold, skip the task
-		skipReason := fmt.Sprintf("Usage above threshold (%.0f%%): 5h=%.0f%%, 7d=%.0f%%. Resets in %s",
-			threshold,
-			usageData.FiveHour.Utilization,
-			usageData.SevenDay.Utilization,
-			usageData.FormatTimeUntilReset())
-
-		// Create a skipped run record
-		run := &db.TaskRun{
-			TaskID:    task.ID,
-			StartedAt: startTime,
-			Status:    db.RunStatusFailed,
-			Error:     skipReason,
-		}
-		endTime := time.Now()
-		run.EndedAt = &endTime
-		if err := e.db.CreateTaskRun(run); err != nil {
-			return &Result{Error: fmt.Errorf("failed to create skipped run record: %w", err)}
+	if !e.disableUsageCheck {
+		// Check usage threshold before running
+		if e.usageClient == nil {
+			if e.usageClientErr != nil {
+				return &Result{Error: fmt.Errorf("usage threshold enforcement unavailable: %w", e.usageClientErr)}
+			}
+			return &Result{Error: fmt.Errorf("usage threshold enforcement unavailable")}
 		}
 
-		var logErr error
-		if e.logger != nil {
-			logErr = e.logger.WriteRunLog(task, run)
+		threshold, thresholdErr := e.db.GetUsageThreshold()
+		if thresholdErr != nil {
+			return &Result{Error: fmt.Errorf("failed to enforce usage threshold: %w", thresholdErr)}
 		}
 
-		return &Result{
-			Skipped:    true,
-			SkipReason: skipReason,
-			Duration:   time.Since(startTime),
-			Error:      logErr,
+		ok, usageData, checkErr := e.usageClient.CheckThreshold(threshold)
+		if checkErr != nil {
+			return &Result{Error: fmt.Errorf("failed to enforce usage threshold: %w", checkErr)}
+		}
+
+		if !ok {
+			// Usage is above threshold, skip the task
+			skipReason := fmt.Sprintf("Usage above threshold (%.0f%%): 5h=%.0f%%, 7d=%.0f%%. Resets in %s",
+				threshold,
+				usageData.FiveHour.Utilization,
+				usageData.SevenDay.Utilization,
+				usageData.FormatTimeUntilReset())
+
+			// Create a skipped run record
+			run := &db.TaskRun{
+				TaskID:    task.ID,
+				StartedAt: startTime,
+				Status:    db.RunStatusFailed,
+				Error:     skipReason,
+			}
+			endTime := time.Now()
+			run.EndedAt = &endTime
+			if err := e.db.CreateTaskRun(run); err != nil {
+				return &Result{Error: fmt.Errorf("failed to create skipped run record: %w", err)}
+			}
+
+			var logErr error
+			if e.logger != nil {
+				logErr = e.logger.WriteRunLog(task, run)
+			}
+
+			return &Result{
+				Skipped:    true,
+				SkipReason: skipReason,
+				Duration:   time.Since(startTime),
+				Error:      logErr,
+			}
 		}
 	}
 

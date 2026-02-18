@@ -1,8 +1,8 @@
 import React from 'react';
 import { render } from '@testing-library/react-native';
 
-import RunOutputScreen from './[id]';
-import { useTask, useTaskRun } from '../../hooks/useTasks';
+import RunOutputScreen from '../../../app/run/[id]';
+import { useTask, useTaskRun } from '../../../hooks/useTasks';
 
 const mockUseLocalSearchParams = jest.fn();
 
@@ -15,12 +15,12 @@ jest.mock('expo-glass-effect', () => ({
   isLiquidGlassAvailable: () => false,
 }));
 
-jest.mock('../../hooks/useTasks', () => ({
+jest.mock('../../../hooks/useTasks', () => ({
   useTask: jest.fn(),
   useTaskRun: jest.fn(),
 }));
 
-jest.mock('../../lib/ThemeContext', () => ({
+jest.mock('../../../lib/ThemeContext', () => ({
   useTheme: () => ({
     colors: {
       background: '#000',

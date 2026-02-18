@@ -208,6 +208,7 @@ Environment variables:
 - `CLAUDE_TASKS_AUTH_TOKEN` - Enable Bearer auth on API routes (except `/api/v1/health`)
 - `CLAUDE_TASKS_CORS_ORIGIN` - Enforce a single allowed CORS origin (`403` on mismatch)
 - `CLAUDE_TASKS_API_RUN_CONCURRENCY` - Max concurrent `POST /run` executions (`0` disables run endpoint)
+- `CLAUDE_TASKS_DISABLE_USAGE_CHECK` - Disable usage threshold enforcement (useful for non-Anthropic auth setups like Vertex)
 
 Example:
 ```bash
@@ -215,6 +216,7 @@ CLAUDE_TASKS_DATA=/custom/path \
 CLAUDE_TASKS_AUTH_TOKEN=supersecret \
 CLAUDE_TASKS_CORS_ORIGIN=https://app.example.com \
 CLAUDE_TASKS_API_RUN_CONCURRENCY=8 \
+CLAUDE_TASKS_DISABLE_USAGE_CHECK=1 \
 ./claude-tasks serve
 ```
 

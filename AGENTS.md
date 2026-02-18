@@ -68,6 +68,7 @@ mobile/                     Expo/React Native mobile app
 - API auth is optional via `CLAUDE_TASKS_AUTH_TOKEN` (Bearer token; health endpoint exempt)
 - CORS can be restricted to a single origin via `CLAUDE_TASKS_CORS_ORIGIN`
 - API run endpoint concurrency is bounded by `CLAUDE_TASKS_API_RUN_CONCURRENCY` (default 8; `0` disables)
+- Usage threshold enforcement can be bypassed with `CLAUDE_TASKS_DISABLE_USAGE_CHECK=1` for non-Anthropic auth setups
 - Default data directory: `~/.claude-tasks/`, overridable via `CLAUDE_TASKS_DATA`
 - Structured JSON logs written to `~/.claude-tasks/logs/<task_id>/` per run
 

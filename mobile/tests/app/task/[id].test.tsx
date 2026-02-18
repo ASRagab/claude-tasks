@@ -1,14 +1,14 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
 
-import TaskDetailScreen from './[id]';
+import TaskDetailScreen from '../../../app/task/[id]';
 import {
   useTask,
   useTaskRuns,
   useToggleTask,
   useRunTask,
   useDeleteTask,
-} from '../../hooks/useTasks';
+} from '../../../hooks/useTasks';
 
 const runMutate = jest.fn();
 
@@ -30,7 +30,7 @@ jest.mock('expo-glass-effect', () => ({
   isLiquidGlassAvailable: () => false,
 }));
 
-jest.mock('../../hooks/useTasks', () => ({
+jest.mock('../../../hooks/useTasks', () => ({
   useTask: jest.fn(),
   useTaskRuns: jest.fn(),
   useToggleTask: jest.fn(),
@@ -38,7 +38,7 @@ jest.mock('../../hooks/useTasks', () => ({
   useDeleteTask: jest.fn(),
 }));
 
-jest.mock('../../lib/ThemeContext', () => ({
+jest.mock('../../../lib/ThemeContext', () => ({
   useTheme: () => ({
     colors: {
       background: '#000',
@@ -56,7 +56,7 @@ jest.mock('../../lib/ThemeContext', () => ({
   }),
 }));
 
-jest.mock('../../lib/ToastContext', () => ({
+jest.mock('../../../lib/ToastContext', () => ({
   useToast: () => ({ showToast: jest.fn() }),
 }));
 

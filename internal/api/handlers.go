@@ -7,7 +7,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ASRagab/claude-tasks/internal/db"
@@ -420,6 +422,21 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) GetUsage(w http.ResponseWriter, r *http.Request) {
 	client, err := usage.NewClient()
 	if err != nil {
+		if isTruthy(strings.TrimSpace(os.Getenv("CLAUDE_TASKS_DISABLE_USAGE_CHECK"))) {
+			now := time.Now().Format(time.RFC3339)
+			s.jsonResponse(w, http.StatusOK, UsageResponse{
+				FiveHour: UsageBucketResponse{
+					Utilization: 0,
+					ResetsAt:    now,
+				},
+				SevenDay: UsageBucketResponse{
+					Utilization: 0,
+					ResetsAt:    now,
+				},
+			})
+			return
+		}
+
 		s.errorResponse(w, http.StatusInternalServerError, "Usage client not available", err)
 		return
 	}
@@ -443,6 +460,15 @@ func (s *Server) GetUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 // Helper functions
+
+func isTruthy(value string) bool {
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 func (s *Server) taskToResponse(task *db.Task, status db.RunStatus) TaskResponse {
 	resp := TaskResponse{

@@ -62,6 +62,77 @@ func TestCreateTaskAndListTasks(t *testing.T) {
 	}
 }
 
+func TestCreateTaskAllowsHTTPWebhooks(t *testing.T) {
+	srv := newTestServer(t)
+
+	createReq := TaskRequest{
+		Name:           "backup",
+		Prompt:         "echo hello",
+		CronExpr:       "0 * * * * *",
+		WorkingDir:     ".",
+		DiscordWebhook: "http://internal.example/discord",
+		SlackWebhook:   "http://internal.example/slack",
+		Enabled:        true,
+	}
+
+	rr := httptest.NewRecorder()
+	req := testutil.JSONRequest(t, http.MethodPost, "/api/v1/tasks", createReq)
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d: %s", http.StatusCreated, rr.Code, rr.Body.String())
+	}
+
+	created := testutil.DecodeJSON[TaskResponse](t, rr)
+	if created.DiscordWebhook != createReq.DiscordWebhook {
+		t.Fatalf("expected discord_webhook %q, got %q", createReq.DiscordWebhook, created.DiscordWebhook)
+	}
+	if created.SlackWebhook != createReq.SlackWebhook {
+		t.Fatalf("expected slack_webhook %q, got %q", createReq.SlackWebhook, created.SlackWebhook)
+	}
+}
+
+func TestUpdateTaskAllowsHTTPWebhooks(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := &db.Task{
+		Name:       "backup",
+		Prompt:     "echo hi",
+		CronExpr:   "0 * * * * *",
+		WorkingDir: ".",
+		Enabled:    true,
+	}
+	if err := srv.db.CreateTask(task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	updateReq := TaskRequest{
+		Name:           "backup",
+		Prompt:         "echo hi",
+		CronExpr:       "0 * * * * *",
+		WorkingDir:     ".",
+		DiscordWebhook: "http://internal.example/discord-updated",
+		SlackWebhook:   "http://internal.example/slack-updated",
+		Enabled:        true,
+	}
+
+	rr := httptest.NewRecorder()
+	req := testutil.JSONRequest(t, http.MethodPut, fmt.Sprintf("/api/v1/tasks/%d", task.ID), updateReq)
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	updated := testutil.DecodeJSON[TaskResponse](t, rr)
+	if updated.DiscordWebhook != updateReq.DiscordWebhook {
+		t.Fatalf("expected discord_webhook %q, got %q", updateReq.DiscordWebhook, updated.DiscordWebhook)
+	}
+	if updated.SlackWebhook != updateReq.SlackWebhook {
+		t.Fatalf("expected slack_webhook %q, got %q", updateReq.SlackWebhook, updated.SlackWebhook)
+	}
+}
+
 func TestGetTaskReturns404ForMissingTask(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -211,6 +282,25 @@ func TestGetTaskRunReturnsSpecificRun(t *testing.T) {
 	}
 }
 
+func TestGetUsageReturnsZeroWhenUsageCheckDisabledAndCredentialsMissing(t *testing.T) {
+	t.Setenv("CLAUDE_TASKS_DISABLE_USAGE_CHECK", "1")
+	t.Setenv("HOME", t.TempDir())
 
+	srv := newTestServer(t)
 
+	rr := httptest.NewRecorder()
+	req := testutil.JSONRequest(t, http.MethodGet, "/api/v1/usage", nil)
+	srv.Router().ServeHTTP(rr, req)
 
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	resp := testutil.DecodeJSON[UsageResponse](t, rr)
+	if resp.FiveHour.Utilization != 0 || resp.SevenDay.Utilization != 0 {
+		t.Fatalf("expected zero utilization when usage check is disabled, got 5h=%v 7d=%v", resp.FiveHour.Utilization, resp.SevenDay.Utilization)
+	}
+	if resp.FiveHour.ResetsAt == "" || resp.SevenDay.ResetsAt == "" {
+		t.Fatalf("expected non-empty reset timestamps when usage check is disabled")
+	}
+}
