@@ -3,13 +3,14 @@ package executor
 import (
 	"context"
 	"errors"
-	"path/filepath"
-	"regexp"
-	"strings"
-	"testing"
-
 	"github.com/ASRagab/claude-tasks/internal/db"
 	"github.com/ASRagab/claude-tasks/internal/testutil"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
+	"testing"
 )
 
 var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -103,6 +104,31 @@ func createTaskForExecutorTest(t *testing.T, database *db.DB, workingDir string)
 	return task
 }
 
+func installFakeClaude(t *testing.T) {
+	t.Helper()
+
+	binDir := t.TempDir()
+	originalPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+originalPath)
+
+	var (
+		binaryName string
+		content    string
+	)
+	if runtime.GOOS == "windows" {
+		binaryName = "claude.bat"
+		content = "@echo off\r\nexit /b 0\r\n"
+	} else {
+		binaryName = "claude"
+		content = "#!/bin/sh\nexit 0\n"
+	}
+
+	binaryPath := filepath.Join(binDir, binaryName)
+	if err := os.WriteFile(binaryPath, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake claude binary: %v", err)
+	}
+}
+
 func TestExecuteFailsClosedWhenUsageCheckUnavailable(t *testing.T) {
 	database, _ := testutil.NewTestDB(t)
 	task := createTaskForExecutorTest(t, database, t.TempDir())
@@ -135,6 +161,8 @@ func TestExecuteAllowsRunWhenUsageCheckDisabled(t *testing.T) {
 	database, dataDir := testutil.NewTestDB(t)
 	missingDir := filepath.Join(t.TempDir(), "missing")
 	task := createTaskForExecutorTest(t, database, missingDir)
+
+	installFakeClaude(t)
 
 	exec := New(database, dataDir)
 	if !exec.disableUsageCheck {
