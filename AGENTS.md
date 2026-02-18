@@ -64,6 +64,10 @@ mobile/                     Expo/React Native mobile app
 - Executor generates a UUID session ID per run and passes `--session-id` to Claude CLI
 - Executor builds CLI flags dynamically based on task's `model` and `permission_mode` fields
 - Usage client reads `~/.claude/.credentials.json` for OAuth token
+- Executor fails task execution if usage threshold enforcement cannot be initialized or checked
+- API auth is optional via `CLAUDE_TASKS_AUTH_TOKEN` (Bearer token; health endpoint exempt)
+- CORS can be restricted to a single origin via `CLAUDE_TASKS_CORS_ORIGIN`
+- API run endpoint concurrency is bounded by `CLAUDE_TASKS_API_RUN_CONCURRENCY` (default 8; `0` disables)
 - Default data directory: `~/.claude-tasks/`, overridable via `CLAUDE_TASKS_DATA`
 - Structured JSON logs written to `~/.claude-tasks/logs/<task_id>/` per run
 
@@ -93,6 +97,7 @@ DELETE /api/v1/tasks/{id}
 POST   /api/v1/tasks/{id}/toggle
 POST   /api/v1/tasks/{id}/run
 GET    /api/v1/tasks/{id}/runs     (response includes session_id)
+GET    /api/v1/tasks/{id}/runs/{runID}
 GET    /api/v1/tasks/{id}/runs/latest
 GET    /api/v1/settings
 PUT    /api/v1/settings

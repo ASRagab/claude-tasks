@@ -203,29 +203,42 @@ Data is stored in `~/.claude-tasks/`:
 - `tasks.db` - SQLite database with tasks, runs, and settings
 - `logs/` - Structured JSON log files per task run
 
-Override the data directory:
+Environment variables:
+- `CLAUDE_TASKS_DATA` - Override default data directory
+- `CLAUDE_TASKS_AUTH_TOKEN` - Enable Bearer auth on API routes (except `/api/v1/health`)
+- `CLAUDE_TASKS_CORS_ORIGIN` - Enforce a single allowed CORS origin (`403` on mismatch)
+- `CLAUDE_TASKS_API_RUN_CONCURRENCY` - Max concurrent `POST /run` executions (`0` disables run endpoint)
+
+Example:
 ```bash
-CLAUDE_TASKS_DATA=/custom/path ./claude-tasks
+CLAUDE_TASKS_DATA=/custom/path \
+CLAUDE_TASKS_AUTH_TOKEN=supersecret \
+CLAUDE_TASKS_CORS_ORIGIN=https://app.example.com \
+CLAUDE_TASKS_API_RUN_CONCURRENCY=8 \
+./claude-tasks serve
 ```
 
 ## REST API
 
 The `serve` command starts an HTTP server. Task and run endpoints include `model`, `permission_mode`, and `session_id` fields.
 
+When `CLAUDE_TASKS_AUTH_TOKEN` is set, include `Authorization: Bearer <token>` on all API requests except health.
+
 ```
-GET    /api/v1/health              Health check
-GET    /api/v1/tasks               List all tasks
-POST   /api/v1/tasks               Create task (supports model, permission_mode)
-GET    /api/v1/tasks/{id}          Get task by ID
-PUT    /api/v1/tasks/{id}          Update task
-DELETE /api/v1/tasks/{id}          Delete task
-POST   /api/v1/tasks/{id}/toggle   Toggle enabled
-POST   /api/v1/tasks/{id}/run      Run immediately
-GET    /api/v1/tasks/{id}/runs     Get task run history (includes session_id)
-GET    /api/v1/tasks/{id}/runs/latest  Get latest run
-GET    /api/v1/settings            Get settings
-PUT    /api/v1/settings            Update settings
-GET    /api/v1/usage               Get API usage stats
+GET    /api/v1/health                   Health check
+GET    /api/v1/tasks                    List all tasks
+POST   /api/v1/tasks                    Create task (supports model, permission_mode)
+GET    /api/v1/tasks/{id}               Get task by ID
+PUT    /api/v1/tasks/{id}               Update task
+DELETE /api/v1/tasks/{id}               Delete task
+POST   /api/v1/tasks/{id}/toggle        Toggle enabled
+POST   /api/v1/tasks/{id}/run           Run immediately
+GET    /api/v1/tasks/{id}/runs          Get task run history (includes session_id)
+GET    /api/v1/tasks/{id}/runs/{runID}  Get a specific run by ID
+GET    /api/v1/tasks/{id}/runs/latest   Get latest run
+GET    /api/v1/settings                 Get settings
+PUT    /api/v1/settings                 Update settings
+GET    /api/v1/usage                    Get API usage stats
 ```
 
 ## Example Tasks
