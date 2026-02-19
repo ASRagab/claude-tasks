@@ -79,6 +79,13 @@ func (db *DB) migrate() error {
 		value TEXT NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS scheduler_leases (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		holder_id TEXT NOT NULL,
+		lease_expires_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	);
+
 	-- Default usage threshold of 80%
 	INSERT OR IGNORE INTO settings (key, value) VALUES ('usage_threshold', '80');
 	`
@@ -299,7 +306,6 @@ func (db *DB) GetTaskRun(taskID, runID int64) (*TaskRun, error) {
 	}
 	return run, nil
 }
-
 
 // GetLatestTaskRun retrieves the most recent run for a task
 func (db *DB) GetLatestTaskRun(taskID int64) (*TaskRun, error) {

@@ -123,6 +123,34 @@ func isTruthy(value string) bool {
 	}
 }
 
+func (e *Executor) failPreflight(task *db.Task, startedAt time.Time, preflightErr error) *Result {
+	endTime := time.Now()
+	run := &db.TaskRun{
+		TaskID:    task.ID,
+		StartedAt: startedAt,
+		EndedAt:   &endTime,
+		Status:    db.RunStatusFailed,
+		Error:     preflightErr.Error(),
+	}
+
+	if err := e.db.CreateTaskRun(run); err != nil {
+		return &Result{
+			Error:    errors.Join(preflightErr, fmt.Errorf("failed to create preflight run record: %w", err)),
+			Duration: endTime.Sub(startedAt),
+		}
+	}
+
+	var logErr error
+	if e.logger != nil {
+		logErr = e.logger.WriteRunLog(task, run)
+	}
+
+	return &Result{
+		Error:    errors.Join(preflightErr, logErr),
+		Duration: endTime.Sub(startedAt),
+	}
+}
+
 // Execute runs a Claude CLI command for the given task
 func (e *Executor) Execute(ctx context.Context, task *db.Task) *Result {
 	startTime := time.Now()
@@ -130,20 +158,21 @@ func (e *Executor) Execute(ctx context.Context, task *db.Task) *Result {
 	if !e.disableUsageCheck {
 		// Check usage threshold before running
 		if e.usageClient == nil {
+			preflightErr := fmt.Errorf("usage threshold enforcement unavailable")
 			if e.usageClientErr != nil {
-				return &Result{Error: fmt.Errorf("usage threshold enforcement unavailable: %w", e.usageClientErr)}
+				preflightErr = fmt.Errorf("usage threshold enforcement unavailable: %w", e.usageClientErr)
 			}
-			return &Result{Error: fmt.Errorf("usage threshold enforcement unavailable")}
+			return e.failPreflight(task, startTime, preflightErr)
 		}
 
 		threshold, thresholdErr := e.db.GetUsageThreshold()
 		if thresholdErr != nil {
-			return &Result{Error: fmt.Errorf("failed to enforce usage threshold: %w", thresholdErr)}
+			return e.failPreflight(task, startTime, fmt.Errorf("failed to enforce usage threshold: %w", thresholdErr))
 		}
 
 		ok, usageData, checkErr := e.usageClient.CheckThreshold(threshold)
 		if checkErr != nil {
-			return &Result{Error: fmt.Errorf("failed to enforce usage threshold: %w", checkErr)}
+			return e.failPreflight(task, startTime, fmt.Errorf("failed to enforce usage threshold: %w", checkErr))
 		}
 
 		if !ok {

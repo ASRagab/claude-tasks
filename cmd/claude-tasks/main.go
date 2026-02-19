@@ -9,19 +9,28 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ASRagab/claude-tasks/internal/api"
 	"github.com/ASRagab/claude-tasks/internal/db"
+	"github.com/ASRagab/claude-tasks/internal/doctor"
 	"github.com/ASRagab/claude-tasks/internal/scheduler"
 	"github.com/ASRagab/claude-tasks/internal/tui"
 	"github.com/ASRagab/claude-tasks/internal/upgrade"
 	"github.com/ASRagab/claude-tasks/internal/version"
 )
 
+type tuiSchedulerMode string
+
+const (
+	tuiSchedulerAuto tuiSchedulerMode = "auto"
+	tuiSchedulerOn   tuiSchedulerMode = "on"
+	tuiSchedulerOff  tuiSchedulerMode = "off"
+)
+
 func main() {
-	// Handle CLI commands
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version", "--version", "-v":
@@ -48,20 +57,77 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "doctor":
+			if err := runDoctor(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "tui":
+			if err := runTUI(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		default:
+			if strings.HasPrefix(os.Args[1], "-") {
+				if err := runTUI(os.Args[1:]); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
 			fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", os.Args[1])
 			printHelp()
 			os.Exit(1)
 		}
 	}
 
-	// Determine database path
+	if err := runTUI(nil); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func parseTUISchedulerMode(value string) (tuiSchedulerMode, error) {
+	switch tuiSchedulerMode(strings.ToLower(strings.TrimSpace(value))) {
+	case tuiSchedulerAuto:
+		return tuiSchedulerAuto, nil
+	case tuiSchedulerOn:
+		return tuiSchedulerOn, nil
+	case tuiSchedulerOff:
+		return tuiSchedulerOff, nil
+	default:
+		return "", fmt.Errorf("invalid --scheduler value %q (expected auto|on|off)", value)
+	}
+}
+
+func shouldStartTUIScheduler(mode tuiSchedulerMode, daemonRunning bool) bool {
+	switch mode {
+	case tuiSchedulerAuto:
+		return !daemonRunning
+	case tuiSchedulerOn:
+		return true
+	default:
+		return false
+	}
+}
+
+func runTUI(args []string) error {
+	tuiCmd := flag.NewFlagSet("tui", flag.ExitOnError)
+	schedulerModeRaw := tuiCmd.String("scheduler", string(tuiSchedulerAuto), "Scheduler mode: auto, on, off")
+	_ = tuiCmd.Parse(args)
+
+	schedulerMode, err := parseTUISchedulerMode(*schedulerModeRaw)
+	if err != nil {
+		return err
+	}
+
 	dataDir := os.Getenv("CLAUDE_TASKS_DATA")
 	if dataDir == "" {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting home directory: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("getting home directory: %w", err)
 		}
 		dataDir = filepath.Join(homeDir, ".claude-tasks")
 	}
@@ -69,39 +135,72 @@ func main() {
 	dbPath := filepath.Join(dataDir, "tasks.db")
 	pidPath := filepath.Join(dataDir, "daemon.pid")
 
-	// Initialize database
 	database, err := db.New(dbPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error initializing database: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initializing database: %w", err)
 	}
 	defer database.Close()
 
-	// Check if daemon is running
 	daemonPID, daemonRunning := isDaemonRunning(pidPath)
+	startScheduler := shouldStartTUIScheduler(schedulerMode, daemonRunning)
 
 	var sched *scheduler.Scheduler
-	if daemonRunning {
-		// Daemon is running, TUI operates in client mode
-		fmt.Printf("Daemon running (PID %d), TUI in client mode\n", daemonPID)
-	} else {
-		// No daemon, start our own scheduler
+	if startScheduler {
 		sched = scheduler.New(database, dataDir)
 		if err := sched.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error starting scheduler: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("starting scheduler: %w", err)
 		}
 		defer sched.Stop()
+		fmt.Printf("TUI scheduler mode: %s (leader=%v)\n", schedulerMode, sched.IsLeader())
+	} else {
+		if daemonRunning {
+			fmt.Printf("Daemon running (PID %d), TUI in client mode\n", daemonPID)
+		}
+		fmt.Printf("TUI scheduler mode: %s (scheduler disabled in this process)\n", schedulerMode)
 	}
 
-	// Run TUI
-	if err := tui.Run(database, sched, daemonRunning, dataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
-		os.Exit(1)
+	daemonMode := sched == nil
+	if err := tui.Run(database, sched, daemonMode, dataDir); err != nil {
+		return fmt.Errorf("running TUI: %w", err)
 	}
+	return nil
+}
+
+func runDoctor() error {
+	dataDir := os.Getenv("CLAUDE_TASKS_DATA")
+	if dataDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("getting home directory: %w", err)
+		}
+		dataDir = filepath.Join(homeDir, ".claude-tasks")
+	}
+
+	report := doctor.NewRunner(dataDir).Run()
+
+	fmt.Println("claude-tasks doctor")
+	fmt.Printf("Data directory: %s\n", report.DataDir)
+	fmt.Printf("Database path: %s\n", report.DBPath)
+	for _, result := range report.Results {
+		fmt.Printf("[%s] %s: %s\n", result.Status, result.Name, result.Detail)
+		if result.Hint != "" {
+			fmt.Printf("  hint: %s\n", result.Hint)
+		}
+	}
+
+	if report.CriticalFailures > 0 {
+		return fmt.Errorf("doctor found %d critical issue(s)", report.CriticalFailures)
+	}
+
+	fmt.Println("Doctor checks passed")
+	return nil
 }
 
 func runDaemon() error {
+	daemonCmd := flag.NewFlagSet("daemon", flag.ExitOnError)
+	schedulerEnabled := daemonCmd.Bool("scheduler", true, "Enable scheduler loop")
+	_ = daemonCmd.Parse(os.Args[2:])
+
 	dataDir := os.Getenv("CLAUDE_TASKS_DATA")
 	if dataDir == "" {
 		homeDir, err := os.UserHomeDir()
@@ -131,11 +230,17 @@ func runDaemon() error {
 	}
 	defer database.Close()
 
-	sched := scheduler.New(database, dataDir)
-	if err := sched.Start(); err != nil {
-		return fmt.Errorf("starting scheduler: %w", err)
+	var sched *scheduler.Scheduler
+	if *schedulerEnabled {
+		sched = scheduler.New(database, dataDir)
+		if err := sched.Start(); err != nil {
+			return fmt.Errorf("starting scheduler: %w", err)
+		}
+		defer sched.Stop()
+		fmt.Printf("Daemon scheduler: enabled (leader=%v)\n", sched.IsLeader())
+	} else {
+		fmt.Println("Daemon scheduler: disabled")
 	}
-	defer sched.Stop()
 
 	fmt.Println("claude-tasks daemon started")
 	fmt.Printf("PID: %d\n", os.Getpid())
@@ -154,6 +259,7 @@ func runServer() error {
 	// Parse flags for serve command
 	serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
 	port := serveCmd.Int("port", 8080, "HTTP server port")
+	schedulerEnabled := serveCmd.Bool("scheduler", true, "Enable scheduler loop")
 	_ = serveCmd.Parse(os.Args[2:])
 
 	dataDir := os.Getenv("CLAUDE_TASKS_DATA")
@@ -173,11 +279,17 @@ func runServer() error {
 	}
 	defer database.Close()
 
-	sched := scheduler.New(database, dataDir)
-	if err := sched.Start(); err != nil {
-		return fmt.Errorf("starting scheduler: %w", err)
+	var sched *scheduler.Scheduler
+	if *schedulerEnabled {
+		sched = scheduler.New(database, dataDir)
+		if err := sched.Start(); err != nil {
+			return fmt.Errorf("starting scheduler: %w", err)
+		}
+		defer sched.Stop()
+		fmt.Printf("Serve scheduler: enabled (leader=%v)\n", sched.IsLeader())
+	} else {
+		fmt.Println("Serve scheduler: disabled")
 	}
-	defer sched.Stop()
 
 	server := api.NewServer(database, sched, dataDir)
 
@@ -261,15 +373,17 @@ func printHelp() {
 	fmt.Println(`claude-tasks - Schedule and run Claude CLI tasks via cron
 
 Usage:
-  claude-tasks              Launch the interactive TUI
-  claude-tasks daemon       Run scheduler in foreground (for services)
-  claude-tasks serve        Run HTTP API server (for mobile/remote access)
-  claude-tasks version      Show version information
-  claude-tasks upgrade      Upgrade to the latest version
-  claude-tasks help         Show this help message
-
-Serve Options:
-  --port                    HTTP server port (default: 8080)
+  claude-tasks                              Launch the interactive TUI
+  claude-tasks --scheduler=auto|on|off      Launch TUI with explicit scheduler mode
+  claude-tasks tui --scheduler=auto|on|off  Launch TUI with explicit scheduler mode
+  claude-tasks daemon [--scheduler=true|false]
+                                            Run daemon (scheduler optional)
+  claude-tasks serve [--port 8080] [--scheduler=true|false]
+                                            Run HTTP API server (scheduler optional)
+  claude-tasks doctor                       Run environment and runtime diagnostics
+  claude-tasks version                      Show version information
+  claude-tasks upgrade                      Upgrade to the latest version
+  claude-tasks help                         Show this help message
 
 Environment Variables:
   CLAUDE_TASKS_DATA         Override data directory (default: ~/.claude-tasks)

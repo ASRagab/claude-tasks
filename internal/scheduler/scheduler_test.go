@@ -86,7 +86,6 @@ func TestAddTaskReturnsErrorWhenPersistingNextRunFails(t *testing.T) {
 	}
 }
 
-
 func TestAddAndRemoveOneOffTask(t *testing.T) {
 	database, dataDir := testutil.NewTestDB(t)
 	s := New(database, dataDir)
@@ -133,5 +132,86 @@ func channelClosed(ch <-chan struct{}) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func TestOnlyOneSchedulerLeaderAtATime(t *testing.T) {
+	databaseA, dataDir := testutil.NewTestDB(t)
+	databaseB, err := db.New(dataDir + "/tasks.db")
+	if err != nil {
+		t.Fatalf("open second db connection: %v", err)
+	}
+	defer databaseB.Close()
+
+	s1 := New(databaseA, dataDir)
+	s2 := New(databaseB, dataDir)
+	s1.leaseTTL = 200 * time.Millisecond
+	s2.leaseTTL = 200 * time.Millisecond
+	s1.leaseRenewInterval = 40 * time.Millisecond
+	s2.leaseRenewInterval = 40 * time.Millisecond
+
+	if err := s1.Start(); err != nil {
+		t.Fatalf("start scheduler 1: %v", err)
+	}
+	defer s1.Stop()
+	if err := s2.Start(); err != nil {
+		t.Fatalf("start scheduler 2: %v", err)
+	}
+	defer s2.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+	s1.refreshLeadership()
+	s2.refreshLeadership()
+	time.Sleep(50 * time.Millisecond)
+
+	if s1.IsLeader() == s2.IsLeader() {
+		t.Fatalf("expected exactly one leader, got s1=%v s2=%v", s1.IsLeader(), s2.IsLeader())
+	}
+}
+
+func TestSchedulerLeadershipFailoverAfterStop(t *testing.T) {
+	databaseA, dataDir := testutil.NewTestDB(t)
+	databaseB, err := db.New(dataDir + "/tasks.db")
+	if err != nil {
+		t.Fatalf("open second db connection: %v", err)
+	}
+	defer databaseB.Close()
+
+	s1 := New(databaseA, dataDir)
+	s2 := New(databaseB, dataDir)
+	s1.leaseTTL = 200 * time.Millisecond
+	s2.leaseTTL = 200 * time.Millisecond
+	s1.leaseRenewInterval = 40 * time.Millisecond
+	s2.leaseRenewInterval = 40 * time.Millisecond
+
+	if err := s1.Start(); err != nil {
+		t.Fatalf("start scheduler 1: %v", err)
+	}
+	if err := s2.Start(); err != nil {
+		t.Fatalf("start scheduler 2: %v", err)
+	}
+	defer s2.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+	s1.refreshLeadership()
+	s2.refreshLeadership()
+	time.Sleep(50 * time.Millisecond)
+
+	var leader, follower *Scheduler
+	if s1.IsLeader() {
+		leader, follower = s1, s2
+	} else if s2.IsLeader() {
+		leader, follower = s2, s1
+	} else {
+		t.Fatalf("expected one scheduler to be leader")
+	}
+
+	leader.Stop()
+	time.Sleep(leader.leaseTTL + 80*time.Millisecond)
+	follower.refreshLeadership()
+	time.Sleep(50 * time.Millisecond)
+
+	if !follower.IsLeader() {
+		t.Fatalf("expected follower to take leadership after leader stop")
 	}
 }

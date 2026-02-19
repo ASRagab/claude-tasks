@@ -242,6 +242,52 @@ func TestRunTaskReturns503WhenRunQueueDisabled(t *testing.T) {
 	}
 }
 
+func TestRunTaskPersistsPreflightFailureRun(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_TASKS_DISABLE_USAGE_CHECK", "")
+
+	srv := newTestServer(t)
+	task := &db.Task{
+		Name:       "preflight-fail",
+		Prompt:     "echo hi",
+		CronExpr:   "0 * * * * *",
+		WorkingDir: ".",
+		Enabled:    true,
+	}
+	if err := srv.db.CreateTask(task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	runRR := httptest.NewRecorder()
+	runReq := testutil.JSONRequest(t, http.MethodPost, fmt.Sprintf("/api/v1/tasks/%d/run", task.ID), nil)
+	srv.Router().ServeHTTP(runRR, runReq)
+	if runRR.Code != http.StatusAccepted {
+		t.Fatalf("expected %d, got %d: %s", http.StatusAccepted, runRR.Code, runRR.Body.String())
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		latestRR := httptest.NewRecorder()
+		latestReq := testutil.JSONRequest(t, http.MethodGet, fmt.Sprintf("/api/v1/tasks/%d/runs/latest", task.ID), nil)
+		srv.Router().ServeHTTP(latestRR, latestReq)
+
+		if latestRR.Code == http.StatusOK {
+			run := testutil.DecodeJSON[TaskRunResponse](t, latestRR)
+			if run.Status != string(db.RunStatusFailed) {
+				t.Fatalf("expected failed run status, got %s", run.Status)
+			}
+			if !strings.Contains(run.Error, "usage threshold enforcement unavailable") {
+				t.Fatalf("expected preflight usage error, got %q", run.Error)
+			}
+			return
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatalf("expected latest run to be available within timeout")
+}
+
 func TestGetTaskRunReturnsSpecificRun(t *testing.T) {
 	srv := newTestServer(t)
 	task := &db.Task{

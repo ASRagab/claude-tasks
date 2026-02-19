@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/ASRagab/claude-tasks/internal/db"
+	"github.com/ASRagab/claude-tasks/internal/logger"
 	"github.com/ASRagab/claude-tasks/internal/testutil"
 	"os"
 	"path/filepath"
@@ -130,11 +131,12 @@ func installFakeClaude(t *testing.T) {
 }
 
 func TestExecuteFailsClosedWhenUsageCheckUnavailable(t *testing.T) {
-	database, _ := testutil.NewTestDB(t)
+	database, dataDir := testutil.NewTestDB(t)
 	task := createTaskForExecutorTest(t, database, t.TempDir())
 
 	exec := &Executor{
 		db:             database,
+		logger:         logger.New(dataDir),
 		usageClientErr: errors.New("credentials not found"),
 	}
 
@@ -150,8 +152,22 @@ func TestExecuteFailsClosedWhenUsageCheckUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get task runs: %v", err)
 	}
-	if len(runs) != 0 {
-		t.Fatalf("expected no run records when usage check fails preflight, got %d", len(runs))
+	if len(runs) != 1 {
+		t.Fatalf("expected one failed run record for preflight failure, got %d", len(runs))
+	}
+	if runs[0].Status != db.RunStatusFailed {
+		t.Fatalf("expected failed run status, got %s", runs[0].Status)
+	}
+	if !strings.Contains(runs[0].Error, "usage threshold enforcement unavailable") {
+		t.Fatalf("expected run error to include usage preflight failure, got %q", runs[0].Error)
+	}
+
+	logFiles, err := filepath.Glob(filepath.Join(dataDir, "logs", "*", "*.json"))
+	if err != nil {
+		t.Fatalf("glob log files: %v", err)
+	}
+	if len(logFiles) != 1 {
+		t.Fatalf("expected one structured log file for preflight failure, got %d", len(logFiles))
 	}
 }
 

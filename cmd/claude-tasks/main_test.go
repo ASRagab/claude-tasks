@@ -1,73 +1,60 @@
 package main
 
-import (
-	"os"
-	"path/filepath"
-	"strconv"
-	"testing"
-)
+import "testing"
 
-func TestIsDaemonRunningReturnsFalseForMissingPidFile(t *testing.T) {
-	pidPath := filepath.Join(t.TempDir(), "missing.pid")
-	if pid, ok := isDaemonRunning(pidPath); ok || pid != 0 {
-		t.Fatalf("expected daemon not running, got pid=%d ok=%v", pid, ok)
+func TestParseTUISchedulerMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    tuiSchedulerMode
+		wantErr bool
+	}{
+		{name: "auto", input: "auto", want: tuiSchedulerAuto},
+		{name: "on", input: "on", want: tuiSchedulerOn},
+		{name: "off", input: "off", want: tuiSchedulerOff},
+		{name: "case insensitive", input: "On", want: tuiSchedulerOn},
+		{name: "trim spaces", input: " off ", want: tuiSchedulerOff},
+		{name: "invalid", input: "maybe", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseTUISchedulerMode(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for input %q", tt.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parse mode: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("expected %q, got %q", tt.want, got)
+			}
+		})
 	}
 }
 
-func TestIsDaemonRunningReturnsFalseForInvalidPidContent(t *testing.T) {
-	pidPath := filepath.Join(t.TempDir(), "daemon.pid")
-	if err := os.WriteFile(pidPath, []byte("not-a-pid"), 0o644); err != nil {
-		t.Fatalf("write pid file: %v", err)
+func TestShouldStartTUIScheduler(t *testing.T) {
+	tests := []struct {
+		name         string
+		mode         tuiSchedulerMode
+		daemonActive bool
+		want         bool
+	}{
+		{name: "auto with daemon running", mode: tuiSchedulerAuto, daemonActive: true, want: false},
+		{name: "auto without daemon", mode: tuiSchedulerAuto, daemonActive: false, want: true},
+		{name: "on with daemon running", mode: tuiSchedulerOn, daemonActive: true, want: true},
+		{name: "off without daemon", mode: tuiSchedulerOff, daemonActive: false, want: false},
 	}
 
-	if pid, ok := isDaemonRunning(pidPath); ok || pid != 0 {
-		t.Fatalf("expected daemon not running, got pid=%d ok=%v", pid, ok)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldStartTUIScheduler(tt.mode, tt.daemonActive)
+			if got != tt.want {
+				t.Fatalf("expected %v, got %v", tt.want, got)
+			}
+		})
 	}
 }
-
-func TestIsDaemonRunningReturnsTrueForCurrentProcessPid(t *testing.T) {
-	pidPath := filepath.Join(t.TempDir(), "daemon.pid")
-	selfPID := os.Getpid()
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(selfPID)), 0o644); err != nil {
-		t.Fatalf("write pid file: %v", err)
-	}
-
-	pid, ok := isDaemonRunning(pidPath)
-	if !ok {
-		t.Fatalf("expected daemon running for current process pid")
-	}
-	if pid != selfPID {
-		t.Fatalf("expected pid %d, got %d", selfPID, pid)
-	}
-}
-
-func TestWritePIDFileCreatesParentDirectory(t *testing.T) {
-	root := t.TempDir()
-	pidPath := filepath.Join(root, "nested", "daemon.pid")
-
-	if err := writePIDFile(pidPath, 4242); err != nil {
-		t.Fatalf("writePIDFile failed: %v", err)
-	}
-
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		t.Fatalf("read pid file: %v", err)
-	}
-	if string(data) != "4242" {
-		t.Fatalf("expected pid file content 4242, got %q", string(data))
-	}
-}
-
-func TestCreateListenerFailsWhenAddressAlreadyInUse(t *testing.T) {
-	first, err := createListener("127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("create first listener: %v", err)
-	}
-	defer first.Close()
-
-	if second, err := createListener(first.Addr().String()); err == nil {
-		_ = second.Close()
-		t.Fatalf("expected second listener creation to fail on same address")
-	}
-}
-

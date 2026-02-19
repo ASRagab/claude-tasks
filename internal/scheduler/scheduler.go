@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -12,68 +13,65 @@ import (
 
 // Scheduler manages cron jobs for tasks
 type Scheduler struct {
-	cron         *cron.Cron
-	db           *db.DB
-	executor     *executor.Executor
-	jobs         map[int64]cron.EntryID
-	cronExprs    map[int64]string      // Track cron expressions to detect changes
-	oneOffTimers map[int64]*time.Timer // Track one-off task timers
-	mu           sync.RWMutex
-	running      bool
-	stopSync     chan struct{}
-	syncDone     chan struct{}
+	cron                *cron.Cron
+	db                  *db.DB
+	executor            *executor.Executor
+	jobs                map[int64]cron.EntryID
+	cronExprs           map[int64]string      // Track cron expressions to detect changes
+	oneOffTimers        map[int64]*time.Timer // Track one-off task timers
+	mu                  sync.RWMutex
+	running             bool
+	stopSync            chan struct{}
+	syncDone            chan struct{}
+	leaseHolderID       string
+	leaseTTL            time.Duration
+	leaseRenewInterval  time.Duration
+	schedulerLeadership bool
 }
 
 // New creates a new scheduler
 func New(database *db.DB, dataDir string) *Scheduler {
 	return &Scheduler{
-		cron:         cron.New(cron.WithSeconds()),
-		db:           database,
-		executor:     executor.New(database, dataDir),
-		jobs:         make(map[int64]cron.EntryID),
-		cronExprs:    make(map[int64]string),
-		oneOffTimers: make(map[int64]*time.Timer),
-		stopSync:     make(chan struct{}),
+		cron:                cron.New(cron.WithSeconds()),
+		db:                  database,
+		executor:            executor.New(database, dataDir),
+		jobs:                make(map[int64]cron.EntryID),
+		cronExprs:           make(map[int64]string),
+		oneOffTimers:        make(map[int64]*time.Timer),
+		stopSync:            make(chan struct{}),
+		leaseHolderID:       fmt.Sprintf("scheduler-%d-%d", os.Getpid(), time.Now().UnixNano()),
+		leaseTTL:            15 * time.Second,
+		leaseRenewInterval:  5 * time.Second,
+		schedulerLeadership: false,
 	}
 }
 
-// Start starts the scheduler and loads existing tasks
+// Start starts the scheduler and leadership maintenance loops.
 func (s *Scheduler) Start() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.running {
+		s.mu.Unlock()
 		return nil
 	}
 
 	s.stopSync = make(chan struct{})
 	s.syncDone = make(chan struct{})
-
-	// Load and schedule existing tasks
-	tasks, err := s.db.ListTasks()
-	if err != nil {
-		return fmt.Errorf("failed to load tasks: %w", err)
-	}
-
-	for _, task := range tasks {
-		if task.Enabled {
-			if err := s.scheduleTaskLocked(task); err != nil {
-				// Log error but continue with other tasks
-				fmt.Printf("Failed to schedule task %d: %v\n", task.ID, err)
-			}
-		}
-	}
-
-	s.cron.Start()
 	s.running = true
+	s.cron.Start()
+	stopSync := s.stopSync
+	syncDone := s.syncDone
+	s.mu.Unlock()
 
-	// Start background sync to pick up DB changes
-	go s.syncLoop(s.stopSync, s.syncDone)
+	s.refreshLeadership()
+	s.SyncTasks()
+
+	// Start background loop to maintain leadership and pick up DB changes.
+	go s.syncLoop(stopSync, syncDone)
 
 	return nil
 }
 
-// Stop stops the scheduler
+// Stop stops the scheduler.
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
 	if !s.running {
@@ -81,12 +79,10 @@ func (s *Scheduler) Stop() {
 		return
 	}
 	s.running = false
-
-	// Cancel all one-off timers
-	for _, timer := range s.oneOffTimers {
-		timer.Stop()
-	}
-	s.oneOffTimers = make(map[int64]*time.Timer)
+	wasLeader := s.schedulerLeadership
+	holderID := s.leaseHolderID
+	s.schedulerLeadership = false
+	s.clearSchedulesLocked()
 
 	stopSync := s.stopSync
 	syncDone := s.syncDone
@@ -102,35 +98,33 @@ func (s *Scheduler) Stop() {
 		<-syncDone
 	}
 
+	if wasLeader {
+		if err := s.db.ReleaseSchedulerLease(holderID); err != nil {
+			fmt.Printf("Failed to release scheduler lease: %v\n", err)
+		}
+	}
+
 	ctx := s.cron.Stop()
 	<-ctx.Done()
 }
 
-// AddTask schedules a new task
+// AddTask schedules a new task when this process is the current scheduler leader.
 func (s *Scheduler) AddTask(task *db.Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if !s.schedulerLeadership {
+		return nil
+	}
 	return s.scheduleTaskLocked(task)
 }
 
-// RemoveTask removes a task from the scheduler
+// RemoveTask removes a task from the local scheduler state.
 func (s *Scheduler) RemoveTask(taskID int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Remove cron job if exists
-	if entryID, ok := s.jobs[taskID]; ok {
-		s.cron.Remove(entryID)
-		delete(s.jobs, taskID)
-		delete(s.cronExprs, taskID)
-	}
-
-	// Cancel one-off timer if exists
-	if timer, ok := s.oneOffTimers[taskID]; ok {
-		timer.Stop()
-		delete(s.oneOffTimers, taskID)
-	}
+	s.removeTaskLocked(taskID)
 }
 
 // UpdateTask updates a task's schedule
@@ -140,6 +134,13 @@ func (s *Scheduler) UpdateTask(task *db.Task) error {
 		return s.AddTask(task)
 	}
 	return nil
+}
+
+// IsLeader reports whether this scheduler currently owns the scheduling lease.
+func (s *Scheduler) IsLeader() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.schedulerLeadership
 }
 
 // GetNextRunTime returns the next scheduled run time for a task
@@ -208,6 +209,13 @@ func (s *Scheduler) scheduleTaskLocked(task *db.Task) error {
 	taskID := task.ID
 
 	entryID, err := s.cron.AddFunc(task.CronExpr, func() {
+		s.mu.RLock()
+		isLeader := s.schedulerLeadership
+		s.mu.RUnlock()
+		if !isLeader {
+			return
+		}
+
 		// Get fresh task data from DB
 		freshTask, err := s.db.GetTask(taskID)
 		if err != nil {
@@ -307,6 +315,13 @@ func (s *Scheduler) executeOneOff(taskID int64) {
 		s.mu.Unlock()
 	}()
 
+	s.mu.RLock()
+	isLeader := s.schedulerLeadership
+	s.mu.RUnlock()
+	if !isLeader {
+		return
+	}
+
 	// Get fresh task data
 	task, err := s.db.GetTask(taskID)
 	if err != nil {
@@ -349,24 +364,76 @@ func (s *Scheduler) RunTaskNow(taskID int64) error {
 	return nil
 }
 
-// syncLoop periodically syncs tasks from DB
+// syncLoop periodically renews leadership and syncs tasks from DB.
 func (s *Scheduler) syncLoop(stopSync <-chan struct{}, syncDone chan<- struct{}) {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
+	leadershipTicker := time.NewTicker(s.leaseRenewInterval)
+	syncTicker := time.NewTicker(10 * time.Second)
+	defer leadershipTicker.Stop()
+	defer syncTicker.Stop()
 	defer close(syncDone)
 
 	for {
 		select {
 		case <-stopSync:
 			return
-		case <-ticker.C:
+		case <-leadershipTicker.C:
+			s.refreshLeadership()
+		case <-syncTicker.C:
+			s.refreshLeadership()
 			s.SyncTasks()
 		}
 	}
 }
 
-// SyncTasks reloads tasks from DB and updates scheduler
+func (s *Scheduler) refreshLeadership() {
+	acquired, lease, err := s.db.TryAcquireSchedulerLease(s.leaseHolderID, s.leaseTTL)
+	if err != nil {
+		fmt.Printf("Failed to refresh scheduler lease: %v\n", err)
+		return
+	}
+
+	var gainedLeadership bool
+	var lostLeadership bool
+	s.mu.Lock()
+	if !s.running {
+		s.mu.Unlock()
+		return
+	}
+
+	switch {
+	case acquired && !s.schedulerLeadership:
+		s.schedulerLeadership = true
+		gainedLeadership = true
+	case !acquired && s.schedulerLeadership:
+		s.schedulerLeadership = false
+		s.clearSchedulesLocked()
+		lostLeadership = true
+	}
+	s.mu.Unlock()
+
+	if gainedLeadership {
+		fmt.Printf("Scheduler leadership acquired: holder=%s\n", s.leaseHolderID)
+		s.SyncTasks()
+		return
+	}
+	if lostLeadership {
+		holder := "unknown"
+		if lease != nil && lease.HolderID != "" {
+			holder = lease.HolderID
+		}
+		fmt.Printf("Scheduler leadership lost: holder=%s active_holder=%s\n", s.leaseHolderID, holder)
+	}
+}
+
+// SyncTasks reloads tasks from DB and updates scheduler.
 func (s *Scheduler) SyncTasks() {
+	s.mu.RLock()
+	isLeader := s.schedulerLeadership
+	s.mu.RUnlock()
+	if !isLeader {
+		return
+	}
+
 	tasks, err := s.db.ListTasks()
 	if err != nil {
 		fmt.Printf("Failed to sync tasks from DB: %v\n", err)
@@ -375,35 +442,31 @@ func (s *Scheduler) SyncTasks() {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.schedulerLeadership {
+		return
+	}
 
-	// Build set of current task IDs in DB
+	// Build set of current task IDs in DB.
 	dbTaskIDs := make(map[int64]bool)
 	for _, task := range tasks {
 		dbTaskIDs[task.ID] = true
 	}
 
-	// Remove cron jobs for tasks that no longer exist
+	// Remove cron jobs for tasks that no longer exist.
 	for taskID := range s.jobs {
 		if !dbTaskIDs[taskID] {
-			if entryID, ok := s.jobs[taskID]; ok {
-				s.cron.Remove(entryID)
-				delete(s.jobs, taskID)
-				delete(s.cronExprs, taskID)
-			}
+			s.removeTaskLocked(taskID)
 		}
 	}
 
-	// Remove one-off timers for tasks that no longer exist
+	// Remove one-off timers for tasks that no longer exist.
 	for taskID := range s.oneOffTimers {
 		if !dbTaskIDs[taskID] {
-			if timer, ok := s.oneOffTimers[taskID]; ok {
-				timer.Stop()
-				delete(s.oneOffTimers, taskID)
-			}
+			s.removeTaskLocked(taskID)
 		}
 	}
 
-	// Add/update tasks
+	// Add/update tasks.
 	for _, task := range tasks {
 		_, hasCronJob := s.jobs[task.ID]
 		_, hasOneOffTimer := s.oneOffTimers[task.ID]
@@ -411,41 +474,52 @@ func (s *Scheduler) SyncTasks() {
 		oldCronExpr := s.cronExprs[task.ID]
 
 		if task.Enabled && !isScheduled {
-			// Task should be scheduled but isn't
+			// Task should be scheduled but isn't.
 			if err := s.scheduleTaskLocked(task); err != nil {
 				fmt.Printf("Failed to schedule task %d during sync: %v\n", task.ID, err)
 			}
 		} else if !task.Enabled && isScheduled {
-			// Task shouldn't be scheduled but is - remove it
-			if entryID, ok := s.jobs[task.ID]; ok {
-				s.cron.Remove(entryID)
-				delete(s.jobs, task.ID)
-				delete(s.cronExprs, task.ID)
-			}
-			if timer, ok := s.oneOffTimers[task.ID]; ok {
-				timer.Stop()
-				delete(s.oneOffTimers, task.ID)
-			}
+			// Task shouldn't be scheduled but is - remove it.
+			s.removeTaskLocked(task.ID)
 		} else if task.Enabled && hasCronJob && task.IsOneOff() {
-			// Task was converted from recurring to one-off, reschedule
-			s.cron.Remove(s.jobs[task.ID])
-			delete(s.jobs, task.ID)
-			delete(s.cronExprs, task.ID)
+			// Task was converted from recurring to one-off, reschedule.
+			s.removeTaskLocked(task.ID)
 			if err := s.scheduleTaskLocked(task); err != nil {
 				fmt.Printf("Failed to reschedule task %d during sync: %v\n", task.ID, err)
 			}
 		} else if task.Enabled && hasOneOffTimer && !task.IsOneOff() {
-			// Task was converted from one-off to recurring, reschedule
-			s.oneOffTimers[task.ID].Stop()
-			delete(s.oneOffTimers, task.ID)
+			// Task was converted from one-off to recurring, reschedule.
+			s.removeTaskLocked(task.ID)
 			if err := s.scheduleTaskLocked(task); err != nil {
 				fmt.Printf("Failed to reschedule task %d during sync: %v\n", task.ID, err)
 			}
 		} else if task.Enabled && hasCronJob && task.CronExpr != oldCronExpr {
-			// Cron expression changed, reschedule
+			// Cron expression changed, reschedule.
 			if err := s.scheduleTaskLocked(task); err != nil {
 				fmt.Printf("Failed to reschedule task %d during sync: %v\n", task.ID, err)
 			}
 		}
+	}
+}
+
+func (s *Scheduler) removeTaskLocked(taskID int64) {
+	if entryID, ok := s.jobs[taskID]; ok {
+		s.cron.Remove(entryID)
+		delete(s.jobs, taskID)
+		delete(s.cronExprs, taskID)
+	}
+
+	if timer, ok := s.oneOffTimers[taskID]; ok {
+		timer.Stop()
+		delete(s.oneOffTimers, taskID)
+	}
+}
+
+func (s *Scheduler) clearSchedulesLocked() {
+	for taskID := range s.jobs {
+		s.removeTaskLocked(taskID)
+	}
+	for taskID := range s.oneOffTimers {
+		s.removeTaskLocked(taskID)
 	}
 }
