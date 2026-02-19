@@ -35,6 +35,9 @@ A TUI scheduler for running Claude tasks on a cron schedule. Built with [Bubble 
 - **Markdown Rendering** - Task output rendered with [Glamour](https://github.com/charmbracelet/glamour)
 - **Self-Update** - Upgrade to the latest version with `claude-tasks upgrade`
 - **SQLite Storage** - Persistent task and run history
+- **Multi-Process Safety** - Scheduler leadership lease ensures only one process executes tasks at a time
+- **Health Diagnostics** - `claude-tasks doctor` validates environment, credentials, database, and scheduler state
+- **Preflight Failure Tracking** - Usage/credential failures are persisted as run records with structured logs
 
 ## Installation
 
@@ -71,13 +74,14 @@ go build -o claude-tasks ./cmd/claude-tasks
 ### CLI Commands
 
 ```bash
-claude-tasks              # Launch the interactive TUI
-claude-tasks daemon       # Run scheduler in foreground (for services)
-claude-tasks serve        # Run HTTP API server (default port 8080)
-claude-tasks serve --port 3000  # Run API on custom port
-claude-tasks version      # Show version information
-claude-tasks upgrade      # Upgrade to the latest version
-claude-tasks help         # Show help message
+claude-tasks                                   # Launch the interactive TUI
+claude-tasks tui --scheduler=auto|on|off       # Launch TUI with explicit scheduler mode
+claude-tasks daemon [--scheduler=true|false]   # Run scheduler in foreground (for services)
+claude-tasks serve [--port 8080] [--scheduler=true|false]  # Run HTTP API server
+claude-tasks doctor                            # Run environment diagnostics
+claude-tasks version                           # Show version information
+claude-tasks upgrade                           # Upgrade to the latest version
+claude-tasks help                              # Show help message
 ```
 
 ### Keybindings
@@ -196,6 +200,31 @@ The header shows real-time usage:
 ```
 ◆ Claude Tasks  5h ████░░░░░░ 42% │ 7d ██████░░░░ 61% │ ⏱ 2h15m │ ⚡ 80%
 ```
+
+### Health Diagnostics
+
+Run `claude-tasks doctor` to validate your environment:
+
+```
+claude-tasks doctor
+[PASS] claude_binary: found at /usr/local/bin/claude
+[PASS] usage_credentials: credentials available
+[PASS] data_dir: writable
+[PASS] logs_dir: writable
+[PASS] database: open and writable
+[PASS] scheduler_lease: holder=scheduler-12345 (active)
+Doctor checks passed
+```
+
+Checks: Claude CLI binary, API credentials, data/logs directory permissions, database writability, scheduler lease state. Any `FAIL` exits non-zero.
+
+### Multi-Process Safety
+
+Multiple instances (TUI + daemon, multiple `serve` processes) safely share the same database. A scheduler leadership lease ensures only one process actively schedules tasks. Others operate as followers and will take over if the leader stops.
+
+Control scheduler behavior per mode:
+- **TUI**: `--scheduler=auto` (default, skip if daemon running), `on`, `off`
+- **Daemon/Serve**: `--scheduler=true` (default), `false`
 
 ## Configuration
 

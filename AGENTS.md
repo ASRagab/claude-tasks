@@ -6,7 +6,7 @@ Instructions for AI coding agents working on this repository.
 
 Claude Tasks is a Go application for scheduling and running Claude CLI tasks via cron expressions. It provides a terminal UI (TUI), a headless daemon mode, and an HTTP REST API with a companion React Native mobile app.
 
-This is a fork of [kylemclaren/claude-tasks](https://github.com/kylemclaren/claude-tasks) with additional features: per-task model selection, permission mode control, session observability, structured logging, and cron-to-English descriptions.
+This is a fork of [kylemclaren/claude-tasks](https://github.com/kylemclaren/claude-tasks) with additional features: per-task model selection, permission mode control, session observability, structured logging, and cron-to-English descriptions, multi-process scheduler lease, environment diagnostics (`doctor` command), and preflight failure persistence.
 
 ## Setup
 
@@ -32,7 +32,8 @@ Requires Go 1.24+ and CGO_ENABLED=1 (the SQLite driver depends on CGO).
 cmd/claude-tasks/main.go    CLI entrypoint, routes subcommands
 internal/
   api/                      REST API (chi router, JSON handlers, CORS middleware)
-  db/                       SQLite database layer (models, CRUD, migrations)
+  db/                       SQLite database layer (models, CRUD, migrations, scheduler lease management)
+  doctor/                   Environment diagnostics (claude binary, credentials, directories, DB, scheduler lease)
   executor/                 Claude CLI subprocess runner with dynamic flags, session IDs, usage gating
   logger/                   Structured JSON run logging per task
   scheduler/                Cron scheduling (robfig/cron, 6-field with seconds)
@@ -71,6 +72,11 @@ mobile/                     Expo/React Native mobile app
 - Usage threshold enforcement can be bypassed with `CLAUDE_TASKS_DISABLE_USAGE_CHECK=1` for non-Anthropic auth setups
 - Default data directory: `~/.claude-tasks/`, overridable via `CLAUDE_TASKS_DATA`
 - Structured JSON logs written to `~/.claude-tasks/logs/<task_id>/` per run
+- Scheduler uses a DB-backed leadership lease (15s TTL, 5s renew interval) to ensure only one process executes tasks across multiple instances
+- `claude-tasks doctor` validates: claude binary on PATH, usage credentials, data/logs directory permissions, database writability, scheduler lease state
+- Preflight failures (missing credentials, usage threshold errors) create failed `task_runs` records with structured log files — never silently dropped
+- TUI supports `--scheduler=auto|on|off`; daemon and serve support `--scheduler=true|false`
+- Doctor exits non-zero on any critical failure (FAIL); warnings (WARN) are informational only
 
 ## Task Configuration Fields
 
@@ -107,9 +113,10 @@ GET    /api/v1/usage
 
 ## Database
 
-SQLite at `~/.claude-tasks/tasks.db`. Three tables: `tasks`, `task_runs`, `settings`. Schema auto-migrates on startup. Foreign keys enabled via connection string.
+SQLite at `~/.claude-tasks/tasks.db`. Four tables: `tasks`, `task_runs`, `settings`, `scheduler_leases`. Schema auto-migrates on startup. Foreign keys enabled via connection string.
 
 Key columns: `tasks.model`, `tasks.permission_mode`, `task_runs.session_id`
+Lease table: `scheduler_leases` (singleton row, tracks holder_id, lease_expires_at for leadership)
 
 ## Do
 
@@ -118,6 +125,8 @@ Key columns: `tasks.model`, `tasks.permission_mode`, `task_runs.session_id`
 - Keep packages focused on a single concern
 - Test with `go test -v ./...` before submitting changes
 - Append new migrations (ALTER TABLE) rather than modifying existing ones
+- Run `claude-tasks doctor` to validate environment before testing
+- Ensure preflight failures create run records (never return errors silently)
 
 ## Avoid
 

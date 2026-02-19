@@ -9,6 +9,7 @@ Claude Tasks schedules and runs Claude CLI commands on a cron schedule. It has t
 1. **TUI** (default) -- Interactive terminal interface built with Bubble Tea
 2. **Daemon** (`claude-tasks daemon`) -- Headless background scheduler
 3. **Server** (`claude-tasks serve`) -- HTTP REST API for remote/mobile access
+4. **Doctor** (`claude-tasks doctor`) -- One-shot environment diagnostics
 
 Data is stored in SQLite at `~/.claude-tasks/tasks.db`. Structured run logs are written to `~/.claude-tasks/logs/`.
 
@@ -23,6 +24,10 @@ This is a fork of [kylemclaren/claude-tasks](https://github.com/kylemclaren/clau
 - **Cron descriptions** -- Human-readable English descriptions of cron expressions in the TUI
 - **Run history view** -- Tabular run list with success rate, avg duration, session IDs
 - **Responsive columns** -- Dynamic column widths in run history based on terminal size
+- **Multi-process safety** -- Scheduler leadership lease ensures single-leader execution across instances
+- **Health diagnostics** -- `claude-tasks doctor` validates binary, credentials, directories, database, and lease
+- **Preflight failure tracking** -- Usage/credential failures persisted as run records with structured logs
+- **Explicit scheduler modes** -- `--scheduler=auto|on|off` for TUI, `--scheduler=true|false` for daemon/serve
 
 ## Build and Test
 
@@ -40,7 +45,8 @@ golangci-lint run --timeout=5m                 # Lint
 |-----------|---------|
 | `cmd/claude-tasks/` | CLI entrypoint and subcommand routing |
 | `internal/api/` | REST API server using chi router |
-| `internal/db/` | SQLite models (`Task`, `TaskRun`) and CRUD |
+| `internal/db/` | SQLite models (`Task`, `TaskRun`), CRUD, scheduler lease management |
+| `internal/doctor/` | Environment diagnostics (claude binary, credentials, dirs, DB, lease) |
 | `internal/executor/` | Builds CLI args dynamically (model, permission mode, session ID), runs Claude subprocess |
 | `internal/logger/` | Structured JSON run logging |
 | `internal/scheduler/` | Cron job management via `robfig/cron/v3` (6-field with seconds) |
@@ -63,6 +69,10 @@ golangci-lint run --timeout=5m                 # Lint
 - **No ORM**: Raw SQL with `database/sql` and parameterized queries throughout.
 - **Auto-migration**: Database schema applies on startup; incremental migrations use `ALTER TABLE` with silent error handling.
 - **Structured logging**: JSON log files written to `~/.claude-tasks/logs/<task_id>/` with run metadata.
+- **Scheduler lease**: DB-backed leadership lease (15s TTL, 5s renew) ensures only one scheduler instance executes tasks. Followers are no-ops; takeover is automatic after lease expiry.
+- **Preflight persistence**: If usage threshold checks or credential validation fail before execution, a failed `task_runs` record and structured log file are created — failures are never silent.
+- **Scheduler modes**: TUI uses `--scheduler=auto` (default: skip if daemon running), `on`, `off`. Daemon/serve use `--scheduler=true` (default), `false`.
+- **Doctor command**: Validates claude binary, usage credentials (skipped if `CLAUDE_TASKS_DISABLE_USAGE_CHECK=1`), data dir, logs dir, database writability, and scheduler lease. Any FAIL exits non-zero.
 
 ## REST API
 
@@ -102,6 +112,10 @@ Base path: `/api/v1`
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CLAUDE_TASKS_DATA` | `~/.claude-tasks` | Data directory for database, logs, and PID file |
+| `CLAUDE_TASKS_DISABLE_USAGE_CHECK` | (unset) | Bypass usage threshold enforcement |
+| `CLAUDE_TASKS_AUTH_TOKEN` | (unset) | Bearer auth token for API routes |
+| `CLAUDE_TASKS_CORS_ORIGIN` | (unset) | Allowed CORS origin for API |
+| `CLAUDE_TASKS_API_RUN_CONCURRENCY` | `8` | Max concurrent API run executions |
 
 ## CI/CD
 

@@ -28,9 +28,10 @@ go build -ldflags="-s -w -X github.com/ASRagab/claude-tasks/internal/version.Ver
 
 ```bash
 claude-tasks              # Launch the interactive TUI
-claude-tasks daemon       # Run scheduler in foreground (for services)
-claude-tasks serve        # Run HTTP API server (default port 8080)
-claude-tasks serve --port 3000  # Run API on custom port
+claude-tasks tui --scheduler=auto|on|off  # Launch TUI with explicit scheduler mode
+claude-tasks daemon [--scheduler=true|false]  # Run daemon (scheduler optional)
+claude-tasks serve [--port 8080] [--scheduler=true|false]  # Run HTTP API server (scheduler optional)
+claude-tasks doctor       # Run environment and runtime diagnostics
 claude-tasks version      # Show version information
 claude-tasks upgrade      # Upgrade to the latest version
 claude-tasks help         # Show help message
@@ -49,7 +50,8 @@ internal/
   tui/                     Bubble Tea TUI (views: list, add, edit, run history, output, settings)
   scheduler/               Cron job scheduling (robfig/cron, 6-field with seconds)
   executor/                Claude CLI subprocess execution with dynamic flags, session IDs, captures output
-  db/                      SQLite models (Task, TaskRun) and CRUD operations
+  db/                      SQLite models (Task, TaskRun), CRUD operations, scheduler lease management
+  doctor/                  Environment and runtime health checks (claude binary, credentials, dirs, DB, lease)
   logger/                  Structured JSON run logging to ~/.claude-tasks/logs/
   usage/                   Anthropic API usage tracking, threshold enforcement
   webhook/                 Discord and Slack webhook notifications
@@ -60,15 +62,17 @@ mobile/                    Expo/React Native app (connects to API server)
 
 ### Execution Flow
 
-1. Scheduler triggers task based on cron expression
-2. Executor checks API usage against threshold (default 80%)
-3. Executor generates a UUID session ID
-4. Builds CLI args dynamically: `-p`, permission mode flag, model flag, `--session-id`, prompt
-5. Spawns Claude CLI in the task's working directory
-6. Captures output, creates TaskRun record with session ID
-7. Writes structured JSON log to `~/.claude-tasks/logs/<task_id>/`
-8. Posts to Discord/Slack webhooks if configured
-9. Updates next run time
+1. Scheduler acquires leadership lease before scheduling (single-leader via DB lease)
+2. Scheduler triggers task based on cron expression
+3. Executor checks API usage against threshold (default 80%)
+3a. If preflight check fails, creates failed TaskRun record and writes structured log
+4. Executor generates a UUID session ID
+5. Builds CLI args dynamically: `-p`, permission mode flag, model flag, `--session-id`, prompt
+6. Spawns Claude CLI in the task's working directory
+7. Captures output, creates TaskRun record with session ID
+8. Writes structured JSON log to `~/.claude-tasks/logs/<task_id>/`
+9. Posts to Discord/Slack webhooks if configured
+10. Updates next run time
 
 ### Key Dependencies
 
@@ -94,6 +98,13 @@ mobile/                    Expo/React Native app (connects to API server)
 1. **TUI Mode** (default): Interactive terminal UI with embedded scheduler
 2. **Daemon Mode** (`daemon`): Headless scheduler, TUI connects as client
 3. **Server Mode** (`serve`): REST API + scheduler for mobile/remote access
+
+4. **Doctor Mode** (`doctor`): One-shot environment diagnostics — validates claude binary, credentials, directories, database, and scheduler lease. Exits non-zero on any critical failure.
+
+All modes support explicit scheduler control:
+- TUI: `--scheduler=auto|on|off` (default: auto — starts scheduler only if no daemon is running)
+- Daemon: `--scheduler=true|false` (default: true)
+- Serve: `--scheduler=true|false` (default: true)
 
 When a daemon is running, the TUI detects it via PID file and operates in client mode (no duplicate scheduler).
 
@@ -188,6 +199,10 @@ const DefaultPermissionMode = "bypassPermissions"
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `CLAUDE_TASKS_DATA` | Override data directory | `~/.claude-tasks` |
+| `CLAUDE_TASKS_DISABLE_USAGE_CHECK` | Disable usage threshold enforcement | (unset) |
+| `CLAUDE_TASKS_AUTH_TOKEN` | Bearer auth token for API routes | (unset) |
+| `CLAUDE_TASKS_CORS_ORIGIN` | Allowed CORS origin for API | (unset) |
+| `CLAUDE_TASKS_API_RUN_CONCURRENCY` | Max concurrent API run executions | `8` |
 
 ## Build Requirements
 
@@ -206,10 +221,13 @@ const DefaultPermissionMode = "bypassPermissions"
 - Usage client reads OAuth token from `~/.claude/.credentials.json` and caches responses for 30s
 - Webhook notifications support both Discord (embeds) and Slack (Block Kit) formats
 - Structured JSON logs written per run to `~/.claude-tasks/logs/<task_id>/`
+- Scheduler uses DB-backed leadership lease (15s TTL, 5s renew) for multi-process safety
+- Preflight failures (usage checks, credential errors) persist as failed TaskRun records with structured logs
+- Doctor command validates environment prerequisites before runtime
 
 ## Database Schema
 
-Three tables: `tasks`, `task_runs`, `settings`. Schema auto-migrates on startup. Incremental migrations use `ALTER TABLE` with silent error handling for idempotency.
+Four tables: `tasks`, `task_runs`, `settings`, `scheduler_leases`. Schema auto-migrates on startup. Incremental migrations use `ALTER TABLE` with silent error handling for idempotency.
 
 Key columns added to `tasks`: `model`, `permission_mode`
 Key column added to `task_runs`: `session_id`
